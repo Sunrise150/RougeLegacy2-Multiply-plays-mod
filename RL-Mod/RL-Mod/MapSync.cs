@@ -221,6 +221,26 @@ namespace RL2Multiplayer
                 Applied = true;
                 PendingWorldReload = true;
 
+                // v1.7.5 致命修复：StageSaveData.m_roomSaveDataLookupTable 是
+                // [NonSerialized] 私有索引表，BinaryFormatter 反序列化后永远是 null。
+                // 游戏所有 GetRoomSaveData() 调用第一行就会在这个 null 上抛 NRE：
+                //   - OnPlayerEnter_LoadStageData → PlacePlayerInRoom_End 中断
+                //     → 相机不切 / "进入房间"事件不广播 / 门触发器永远不开
+                //     = "客机无法进入下一个房间"（从地图同步上线那天起一直如此）；
+                //   - ReturnToMainMenuOptionItem 第一行 → 退主菜单流程中断
+                //     = "返回主界面按钮点了没反应"；
+                //   - MapController 小地图全坏。
+                // 游戏自己读档后的正常路径会调 CreateAllBiomeLookupTable()，
+                // 我们绕过了它，必须手动补上（幂等，重复调用无副作用）。
+                EnsureLookupTable(stage);
+
+                // v1.7.4：只借主机的**地图布局**，不借房间进度。
+                // StageSaveData 里每个 RoomSaveData 都带着敌人生死 / 箱子开关 /
+                // 可破坏物状态 / 是否访问过 —— 整体拷过来会让"主机清完的房间"
+                // 在客机上也变成空房间（两人世界被混合），而且客机自己的进度
+                // 会写进这份主机副本、写盘时又被还原，进退两难。
+                ResetRuntimeState(stage);
+
                 int biomes = 0, rooms = 0;
                 try
                 {
@@ -250,6 +270,97 @@ namespace RL2Multiplayer
             {
                 Plugin.Log.LogWarning("[RL2MP] [MAP] 应用地图失败: " + ex.Message + "\n" + ex.StackTrace);
             }
+        }
+
+        /// <summary>
+        /// 把主机地图里的"运行时进度"重置成客机自己的状态：
+        /// 怪全在、箱子全没开、可破坏物全是好的、房间完成度归零。
+        ///
+        /// 地图布局（RoomSeed / RoomID / GridCoordinates / 连接关系 / 房间类型）保持主机的，
+        /// 保证两人走的是同一张图；但敌人生死、箱子开关、可破坏物、房间完成度这些都归
+        /// 客机自己 —— 竞速是各打各的，主机清完房间不应该让客机的房间变空。
+        /// RoomVisited 故意保留：客机小地图直接能看到整条路线，不用重新摸黑。
+        /// 这也顺带修掉"客机进度写进主机副本、写盘又被还原"的存档错位。
+        /// </summary>
+        private static void ResetRuntimeState(StageSaveData stage)
+        {
+            int rooms = 0, enemies = 0, chests = 0, breakables = 0;
+            try
+            {
+                if (stage == null || stage.RoomSaveDataDict == null) return;
+
+                foreach (var kv in stage.RoomSaveDataDict)
+                {
+                    var list = kv.Value;
+                    if (list == null) continue;
+
+                    for (int i = 0; i < list.Count; i++)
+                    {
+                        var rd = list[i];
+                        if (rd == null) continue;
+
+                        // 保留 RoomVisited（主机的探索记录，客机小地图能直接看到路线，竞速更好用），
+                        // 但房间完成度要归零：客机必须自己清房/打 Boss。
+                        rd.IsRoomComplete = false;
+
+                        if (rd.EnemyStates != null)
+                        {
+                            for (int k = 0; k < rd.EnemyStates.Length; k++)
+                            {
+                                var st = rd.EnemyStates[k];
+                                if (st == null) continue;
+                                st.IsStateActive = true;
+                                st.IsSpawned = true;
+                                enemies++;
+                            }
+                        }
+
+                        if (rd.ChestStates != null)
+                        {
+                            for (int k = 0; k < rd.ChestStates.Length; k++)
+                            {
+                                var st = rd.ChestStates[k];
+                                if (st == null) continue;
+                                st.IsStateActive = true;   // 没开过
+                                chests++;
+                            }
+                        }
+
+                        if (rd.BreakableStates != null)
+                        {
+                            for (int k = 0; k < rd.BreakableStates.Length; k++)
+                            {
+                                var st = rd.BreakableStates[k];
+                                if (st == null) continue;
+                                st.IsStateActive = true;
+                                st.AttackerIsOnRight = false;
+                                breakables++;
+                            }
+                        }
+
+                        if (rd.DecoBreakableStates != null)
+                        {
+                            for (int k = 0; k < rd.DecoBreakableStates.Length; k++)
+                            {
+                                var st = rd.DecoBreakableStates[k];
+                                if (st == null) continue;
+                                st.IsStateActive = true;
+                                st.AttackerIsOnRight = false;
+                            }
+                        }
+
+                        rooms++;
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [MAP] 重置房间运行状态失败: " + ex.Message);
+            }
+
+            Plugin.Log.LogInfo("[RL2MP] [MAP] 房间进度已重置为'全新'："
+                + rooms + " 个房间 / " + enemies + " 个怪位 / " + chests + " 个箱子 / "
+                + breakables + " 个可破坏物（两人世界独立，互不影响）。");
         }
 
         private static void ResetBuffer()
@@ -342,6 +453,26 @@ namespace RL2Multiplayer
 
         // ---------------- 存档保护 ----------------
 
+        /// <summary>
+        /// v1.7.5：重建 StageSaveData 的房间索引表。
+        /// m_roomSaveDataLookupTable 是 [NonSerialized]，反序列化后为 null，
+        /// 所有 GetRoomSaveData() 都会 NRE（过门断链 / 退主菜单失效 / 小地图坏）。
+        /// 游戏自己的 CreateAllBiomeLookupTable() 是 public 且幂等。
+        /// </summary>
+        private static void EnsureLookupTable(StageSaveData stage)
+        {
+            if (stage == null) return;
+            try
+            {
+                stage.CreateAllBiomeLookupTable();
+                Plugin.Log.LogInfo("[RL2MP] [MAP] 房间索引表已重建（" + stage.RoomSaveDataDict.Count + " 个区域）。");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [MAP] 重建房间索引表失败: " + ex.Message);
+            }
+        }
+
         internal static void RestoreForSave()
         {
             if (!Applied || _original == null) return;
@@ -352,6 +483,7 @@ namespace RL2Multiplayer
         {
             if (!Applied || _hostStage == null) return;
             SaveManager.StageSaveData = _hostStage;
+            EnsureLookupTable(_hostStage);   // 同上：索引表必须非 null
         }
 
         private static StageSaveData _hostStage; // 主机地图（应用时保存引用，供写盘后还原）
@@ -385,7 +517,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [MAP] LoadGameData patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [MAP] LoadGameData patch failed: " + Plugin.PatchError(ex));
             }
         }
 
@@ -423,6 +555,9 @@ namespace RL2Multiplayer
                 if (_original != null)
                 {
                     SaveManager.StageSaveData = _original;
+                    // 客机原始数据若也经历过我们的反序列化流程，索引表同样可能是 null；
+                    // CreateAllBiomeLookupTable 幂等，直接补一次。
+                    EnsureLookupTable(_original);
                     Plugin.Log.LogInfo("[RL2MP] [MAP] 已恢复客机自己的地图数据（" + reason + "）。");
                 }
             }

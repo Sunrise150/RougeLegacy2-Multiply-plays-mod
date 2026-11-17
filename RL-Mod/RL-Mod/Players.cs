@@ -23,6 +23,8 @@ namespace RL2Multiplayer
         // 得分
         public int Score;
         public int Rooms, Kills, Bosses, Relics;
+        public int Chests, ChestPoints;   // 开箱数 / 开箱得分（v1.7.2）
+        public int CoinPoints, GoldCollected; // 金币折算分 / 本局收集金币（v1.7.2）
 
         // 会话恢复（v1.6.0）：主机为每个客机生成 token，重连时校验；
         // Offline = 网络断了但仍在重连宽限期内（槽位保留，成绩不清）
@@ -43,6 +45,10 @@ namespace RL2Multiplayer
             Kills = 0;
             Bosses = 0;
             Relics = 0;
+            Chests = 0;
+            ChestPoints = 0;
+            CoinPoints = 0;
+            GoldCollected = 0;
         }
 
         /// <summary>紧凑标签：主机 / P2 / P3 …</summary>

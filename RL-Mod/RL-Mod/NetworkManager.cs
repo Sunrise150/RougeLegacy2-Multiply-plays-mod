@@ -40,6 +40,7 @@ namespace RL2Multiplayer
         Hello = 28,             // 客机 -> 主机：连接握手（int playerId, int token；首次 playerId=-1）
         PlayerAnim = 29,        // 双向：动画状态（10Hz，Sequenced）
         PlayerFlags = 30,       // 双向：状态位 downed（变化时才发，Reliable）
+        Projectile = 31,        // 双向：弹体发射事件（终态快照，ReliableUnordered）
     }
 
     public class NetworkManager : MonoBehaviour, INetEventListener
@@ -53,6 +54,13 @@ namespace RL2Multiplayer
 
         public bool IsHost { get; private set; }
         public bool Connected { get { return _netManager != null && _netManager.IsRunning; } }
+        /// <summary>
+        /// "已入局"标志：从开局/收到 Welcome 开始为 true，只有主动 Stop() 才清掉。
+        /// 断线重连期间 Connected 仍是 true，但主机结束对局/网络彻底断了之后 Connected 变 false，
+        /// 此时如果还按 Connected 判断"是否联机中"，玩家一死就会被当成单机真死（回城堡）。
+        /// 死亡拦截改用这个标志，保证整局内死亡都走复活。
+        /// </summary>
+        public bool SessionActive { get; private set; }
         public int LocalPlayerId { get; private set; } = -1;
 
         public event Action<int> OnPlayerJoin;
@@ -200,7 +208,9 @@ namespace RL2Multiplayer
                 }
 
                 _animSendTimer += Time.unscaledDeltaTime;
-                if (_animSendTimer >= 0.1f)
+                // v1.6.4：20Hz。10Hz 对枪手这类高频射击动作采样太稀，远端分身
+                // 攻击动画 scrub 拖影/抽搐。包约 300 字节，20Hz 双向 <12KB/s，可接受。
+                if (_animSendTimer >= 0.05f)
                 {
                     _animSendTimer = 0f;
                     SendAnimPacket();
@@ -349,6 +359,7 @@ namespace RL2Multiplayer
             _ghosts.Clear();
             _pendingPeers.Clear();
             _manualStop = false;
+            SessionActive = true;
             Roster.SyncSelf();
 
             Plugin.Log.LogInfo("[RL2MP] [START HOST] SUCCESS! IsHost=true, LocalPlayerId=" + LocalPlayerId
@@ -425,6 +436,7 @@ namespace RL2Multiplayer
             Plugin.Log.LogInfo("[RL2MP] Stop() called. _netManager=" + (_netManager != null ? "exists" : "null") + ", debugSimActive=" + _debugSimActive);
 
             _manualStop = true;
+            SessionActive = false;
             _reconnecting = false;
             _ghosts.Clear();
             _pendingPeers.Clear();
@@ -561,13 +573,101 @@ namespace RL2Multiplayer
 
         private void SendAnimPacketInner(PlayerStateData p)
         {
+            // v1.6.3：全层动画 + 参数。Player_Animator 有 12 层，攻击/冲刺在更高层；
+            // 参数驱动 blend tree。两台真机上旧版只发第 0 层，远端看不到攻击/冲刺动作。
             var w = new NetDataWriter();
             w.Put((byte)MsgType.PlayerAnim);
             w.Put(LocalPlayerId);
-            w.Put(p.AnimStateHash);
-            w.Put(p.AnimNormalizedTime);
+            WriteAnimPayload(w, p);
             SendToPeers(w, DeliveryMethod.Sequenced);
             _sendCountSinceLastLog++;
+        }
+
+        /// <summary>动画载荷（层状态 + 参数快照）。发送与主机中转共用。</summary>
+        private static void WriteAnimPayload(NetDataWriter w, PlayerStateData p)        {
+            int layers = p.LayerHashes != null ? Mathf.Min(p.LayerHashes.Length, 16) : 0;
+            w.Put((byte)layers);
+            for (int l = 0; l < layers; l++)
+            {
+                w.Put(p.LayerHashes[l]);
+                w.Put(p.LayerTimes[l]);
+            }
+
+            int nf = p.FloatParams != null ? Mathf.Min(p.FloatParams.Length, 255) : 0;
+            w.Put((byte)nf);
+            for (int i = 0; i < nf; i++) w.Put(p.FloatParams[i]);
+
+            int ni = p.IntParams != null ? Mathf.Min(p.IntParams.Length, 255) : 0;
+            w.Put((byte)ni);
+            for (int i = 0; i < ni; i++) w.Put(p.IntParams[i]);
+
+            int nb = p.BoolParams != null ? Mathf.Min(p.BoolParams.Length, 255) : 0;
+            w.Put((byte)nb);
+            int bytes = (nb + 7) / 8;
+            for (int k = 0; k < bytes; k++)
+            {
+                int bits = 0;
+                for (int j = 0; j < 8 && k * 8 + j < nb; j++)
+                    if (p.BoolParams[k * 8 + j]) bits |= 1 << j;
+                w.Put((byte)bits);
+            }
+        }
+
+        /// <summary>解析动画载荷为 PlayerStateData 的动画字段（接收端 + 中转复用）。</summary>
+        private static PlayerStateData ReadAnimPayload(NetDataReader reader)
+        {
+            var p = new PlayerStateData();
+            int layers = reader.GetByte();
+            if (layers > 0 && layers <= 16)
+            {
+                var lh = new int[layers];
+                var lt = new float[layers];
+                for (int l = 0; l < layers; l++)
+                {
+                    lh[l] = reader.GetInt();
+                    lt[l] = reader.GetFloat();
+                }
+                p.LayerHashes = lh;
+                p.LayerTimes = lt;
+            }
+            else
+            {
+                // 层数异常：剩余字节不用管，Sequenced 包按序读坏一包无碍
+                layers = Mathf.Max(layers % 256, 0);
+                if (layers > 16) layers = 16;
+                for (int l = 0; l < layers; l++) { reader.GetInt(); reader.GetFloat(); }
+            }
+
+            int nf = reader.GetByte();
+            if (nf > 0 && nf <= 255)
+            {
+                var fp = new float[nf];
+                for (int i = 0; i < nf; i++) fp[i] = reader.GetFloat();
+                p.FloatParams = fp;
+            }
+
+            int ni = reader.GetByte();
+            if (ni > 0 && ni <= 255)
+            {
+                var ip = new int[ni];
+                for (int i = 0; i < ni; i++) ip[i] = reader.GetInt();
+                p.IntParams = ip;
+            }
+
+            int nb = reader.GetByte();
+            if (nb > 0 && nb <= 255)
+            {
+                var bp = new bool[nb];
+                int bytes = (nb + 7) / 8;
+                for (int k = 0; k < bytes; k++)
+                {
+                    int bits = reader.GetByte();
+                    for (int j = 0; j < 8 && k * 8 + j < nb; j++)
+                        bp[k * 8 + j] = (bits & (1 << j)) != 0;
+                }
+                p.BoolParams = bp;
+            }
+            return p;
         }
 
         /// <summary>按当前身份发到一个或所有对端（主机 -> 全部客机；客机 -> 主机）。</summary>
@@ -847,8 +947,9 @@ namespace RL2Multiplayer
             SendToAllReliable(w);
         }
 
-        /// <summary>计分规则（主机权威）。</summary>
-        public void SendScoreConfig(RaceGameMode mode, int room, int enemy, int boss, int relic, int death, int decay)
+        /// <summary>计分规则（主机权威）。v1.7.2 追加：开箱分值 4 档 + 金币折算。</summary>
+        public void SendScoreConfig(RaceGameMode mode, int room, int enemy, int boss, int relic, int death, int decay,
+            int chestBronze, int chestSilver, int chestGold, int chestFairy, int goldPerPoint, float goldNgPlusStep)
         {
             var w = new NetDataWriter();
             w.Put((byte)MsgType.ScoreConfig);
@@ -859,11 +960,18 @@ namespace RL2Multiplayer
             w.Put(relic);
             w.Put(death);
             w.Put(decay);
+            w.Put(chestBronze);
+            w.Put(chestSilver);
+            w.Put(chestGold);
+            w.Put(chestFairy);
+            w.Put(goldPerPoint);
+            w.Put(goldNgPlusStep);
             SendToAllReliable(w, false);
         }
 
-        /// <summary>当前积分（0.5 秒节流发送）。</summary>
-        public void SendScoreState(int playerId, int score, int rooms, int kills, int bosses, int relics, int deaths)
+        /// <summary>当前积分（0.5 秒节流发送）。v1.7.2 追加：箱子 / 金币折算明细。</summary>
+        public void SendScoreState(int playerId, int score, int rooms, int kills, int bosses, int relics, int deaths,
+            int chests, int chestPoints, int coinPoints, int goldCollected)
         {
             var w = new NetDataWriter();
             w.Put((byte)MsgType.ScoreState);
@@ -874,6 +982,10 @@ namespace RL2Multiplayer
             w.Put(bosses);
             w.Put(relics);
             w.Put(deaths);
+            w.Put(chests);
+            w.Put(chestPoints);
+            w.Put(coinPoints);
+            w.Put(goldCollected);
             SendToAllReliable(w, false);
         }
 
@@ -939,6 +1051,23 @@ namespace RL2Multiplayer
             if (peer == null || peer.ConnectionState != ConnectionState.Connected) return false;
             peer.Send(w, DeliveryMethod.ReliableOrdered);
             return true;
+        }
+
+        /// <summary>弹体发射事件：每个弹都是离散事件，用 ReliableUnordered（丢了重传但不排队，乱序无所谓）。</summary>
+        internal void SendProjectile(NetDataWriter w)
+        {
+            if (IsHost)
+            {
+                foreach (var c in _clients.Values)
+                {
+                    if (c != null && c.ConnectionState == ConnectionState.Connected)
+                        c.Send(w, DeliveryMethod.ReliableUnordered);
+                }
+            }
+            else if (_serverPeer != null && _serverPeer.ConnectionState == ConnectionState.Connected)
+            {
+                _serverPeer.Send(w, DeliveryMethod.ReliableUnordered);
+            }
         }
 
         /// <summary>HOST：把一条消息转发给除 excludePlayerId 之外的所有客机（多人局里互通状态用）。</summary>
@@ -1165,7 +1294,9 @@ namespace RL2Multiplayer
 
             // 计分规则 + 当前积分（新客机进来看板立刻是对的）
             SendScoreConfig(Score.Mode, Score.RoomPoints, Score.EnemyPoints, Score.BossPoints,
-                Score.RelicPenalty, Score.DeathPenalty, Score.DecayPerMinute);
+                Score.RelicPenalty, Score.DeathPenalty, Score.DecayPerMinute,
+                Score.ChestBronzePoints, Score.ChestSilverPoints, Score.ChestGoldPoints, Score.ChestFairyPoints,
+                Score.GoldPerPoint, Score.GoldNgPlusStep);
             if (Race.InSession)
             {
                 var w4 = new NetDataWriter();
@@ -1177,6 +1308,10 @@ namespace RL2Multiplayer
                 w4.Put(Score.LocalBosses);
                 w4.Put(Score.LocalRelics);
                 w4.Put(Race.LocalDeaths);
+                w4.Put(Score.LocalChests);
+                w4.Put(Score.LocalChestPoints);
+                w4.Put(Score.LocalCoinPoints);
+                w4.Put(Score.LocalGoldConverted);
                 peer.Send(w4, DeliveryMethod.ReliableOrdered);
             }
 
@@ -1398,6 +1533,7 @@ namespace RL2Multiplayer
                     _sessionToken = token;
                     _resumeId = assignedId;
                     LocalPlayerId = assignedId;
+                    SessionActive = true;
                     _knownPlayerIds.Add(assignedId);
                     Roster.SyncSelf();
                     Roster.Get(assignedId).Offline = false;
@@ -1500,8 +1636,7 @@ namespace RL2Multiplayer
                 else if (type == (byte)MsgType.PlayerAnim)
                 {
                     int id = reader.GetInt();
-                    int animHash = reader.GetInt();
-                    float animTime = reader.GetFloat();
+                    var p = ReadAnimPayload(reader);
 
                     if (IsHost && id != HostId)
                     {
@@ -1509,14 +1644,14 @@ namespace RL2Multiplayer
                         {
                             rw.Put((byte)MsgType.PlayerAnim);
                             rw.Put(id);
-                            rw.Put(animHash);
-                            rw.Put(animTime);
+                            WriteAnimPayload(rw, p);
                         });
                     }
 
                     if (id != LocalPlayerId && PlayerSync.Instance != null)
                     {
-                        PlayerSync.Instance.HandleRemoteAnim(id, animHash, animTime);
+                        PlayerSync.Instance.HandleRemoteAnim(id, p.LayerHashes, p.LayerTimes,
+                            p.FloatParams, p.IntParams, p.BoolParams);
                     }
                 }
                 else if (type == (byte)MsgType.PlayerFlags)
@@ -1537,6 +1672,54 @@ namespace RL2Multiplayer
                     if (id != LocalPlayerId && PlayerSync.Instance != null)
                     {
                         PlayerSync.Instance.HandleRemoteFlags(id, downed);
+                    }
+                }
+                else if (type == (byte)MsgType.Projectile)
+                {
+                    int id = reader.GetInt();
+                    string pname = reader.GetString();
+                    float px = reader.GetFloat(); float py = reader.GetFloat(); float pz = reader.GetFloat();
+                    float eulerZ = reader.GetFloat();
+                    float scaleX = reader.GetFloat();
+                    float hx = reader.GetFloat(); float hy = reader.GetFloat();
+                    float speed = reader.GetFloat();
+                    float accX = reader.GetFloat(); float accY = reader.GetFloat();
+                    bool snap = reader.GetBool();
+                    float snapLx = 0f, snapLy = 0f, snapLz = 0f, snapRotZ = 0f;
+                    if (snap)
+                    {
+                        snapLx = reader.GetFloat(); snapLy = reader.GetFloat(); snapLz = reader.GetFloat();
+                        snapRotZ = reader.GetFloat();
+                    }
+                    float lifespan = reader.GetFloat();
+
+                    if (IsHost && id != HostId)
+                    {
+                        RelayToOtherClients(id, delegate (NetDataWriter rw)
+                        {
+                            rw.Put((byte)MsgType.Projectile);
+                            rw.Put(id);
+                            rw.Put(pname);
+                            rw.Put(px); rw.Put(py); rw.Put(pz);
+                            rw.Put(eulerZ);
+                            rw.Put(scaleX);
+                            rw.Put(hx); rw.Put(hy);
+                            rw.Put(speed);
+                            rw.Put(accX); rw.Put(accY);
+                            rw.Put(snap);
+                            if (snap)
+                            {
+                                rw.Put(snapLx); rw.Put(snapLy); rw.Put(snapLz);
+                                rw.Put(snapRotZ);
+                            }
+                            rw.Put(lifespan);
+                        });
+                    }
+
+                    if (id != LocalPlayerId)
+                    {
+                        ProjectileSync.SpawnRemoteVisual(id, pname, px, py, pz, eulerZ, scaleX,
+                            hx, hy, speed, accX, accY, snap, snapLx, snapLy, snapLz, snapRotZ, lifespan);
                     }
                 }
                 else if (type == (byte)MsgType.RaceConfig)
@@ -1641,7 +1824,14 @@ namespace RL2Multiplayer
                     int relicP = reader.GetInt();
                     int deathP = reader.GetInt();
                     int decayP = reader.GetInt();
-                    Score.ApplyConfig(mode, roomP, enemyP, bossP, relicP, deathP, decayP);
+                    int chestB = reader.GetInt();
+                    int chestS = reader.GetInt();
+                    int chestG = reader.GetInt();
+                    int chestF = reader.GetInt();
+                    int goldPerPoint = reader.GetInt();
+                    float goldStep = reader.GetFloat();
+                    Score.ApplyConfig(mode, roomP, enemyP, bossP, relicP, deathP, decayP,
+                        chestB, chestS, chestG, chestF, goldPerPoint, goldStep);
                 }
                 else if (type == (byte)MsgType.ScoreState)
                 {
@@ -1652,7 +1842,11 @@ namespace RL2Multiplayer
                     int bs = reader.GetInt();
                     int rl = reader.GetInt();
                     int dt = reader.GetInt();
-                    Score.HandleState(pid, sc, rm, kl, bs, rl, dt);
+                    int ch = reader.GetInt();
+                    int chp = reader.GetInt();
+                    int cp = reader.GetInt();
+                    int gc = reader.GetInt();
+                    Score.HandleState(pid, sc, rm, kl, bs, rl, dt, ch, chp, cp, gc);
                     RelayToOtherClients(pid, delegate (NetDataWriter rw)
                     {
                         rw.Put((byte)MsgType.ScoreState);
@@ -1663,6 +1857,10 @@ namespace RL2Multiplayer
                         rw.Put(bs);
                         rw.Put(rl);
                         rw.Put(dt);
+                        rw.Put(ch);
+                        rw.Put(chp);
+                        rw.Put(cp);
+                        rw.Put(gc);
                     });
                 }
                 else if (type == (byte)MsgType.RaceEnd)

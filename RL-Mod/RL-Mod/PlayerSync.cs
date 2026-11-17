@@ -20,6 +20,17 @@ namespace RL2Multiplayer
         public int AnimStateHash;
         /// <summary>当前状态的归一化时间（0..1，循环状态会 >1 累积）。</summary>
         public float AnimNormalizedTime;
+
+        // ---- v1.6.3 全层动画同步 ----
+        // 真机联机原来只发第 0 层：Player_Animator 有 12 层，攻击/虚空冲刺等动作
+        // 都在更高层 —— 远端永远看不到。现在同步所有层的 (状态hash, 归一化时间)。
+        public int[] LayerHashes;
+        public float[] LayerTimes;
+        // 动画参数按类型顺序快照（本地/远端用同一 Player_Animator，索引天然对齐）。
+        // 参数驱动 blend tree 与层权重 —— 攻击方向、蓄力高度都靠它。
+        public float[] FloatParams;
+        public int[] IntParams;
+        public bool[] BoolParams;
     }
 
     public class PlayerSync : MonoBehaviour
@@ -303,13 +314,61 @@ namespace RL2Multiplayer
                 state.FacingRight = GetBoolProp(t, LocalPlayer, "IsFacingRight");
                 state.Grounded = GetBoolProp(t, LocalPlayer, "IsGrounded");
 
-                // 动画状态（第 0 层）。读不到就保持 0，远端自动降级为待机。
+                // 动画状态：v1.6.3 起同步所有层 + 全部参数（旧版只发第 0 层，
+                // 攻击/冲刺在更高层，远端看不到）
                 var anim = EnsureLocalAnimator();
                 if (anim != null)
                 {
-                    var info = anim.GetCurrentAnimatorStateInfo(0);
-                    state.AnimStateHash = info.shortNameHash;
-                    state.AnimNormalizedTime = info.normalizedTime;
+                    int layers = Mathf.Min(anim.layerCount, 16);
+                    var hashes = new int[layers];
+                    var times = new float[layers];
+                    for (int l = 0; l < layers; l++)
+                    {
+                        try
+                        {
+                            var info = anim.GetCurrentAnimatorStateInfo(l);
+                            hashes[l] = info.shortNameHash;
+                            times[l] = info.normalizedTime;
+                        }
+                        catch { hashes[l] = 0; times[l] = 0f; } // 无状态机/同步层
+                    }
+                    state.LayerHashes = hashes;
+                    state.LayerTimes = times;
+                    state.AnimStateHash = hashes.Length > 0 ? hashes[0] : 0;
+                    state.AnimNormalizedTime = hashes.Length > 0 ? times[0] : 0f;
+
+                    // 参数快照（float/int/bool 按 controller 参数表顺序；trigger 读不到，靠层状态 scrub 兜底）
+                    try
+                    {
+                        var prms = anim.parameters;
+                        int nf = 0, ni = 0, nb = 0;
+                        for (int i = 0; i < prms.Length; i++)
+                        {
+                            switch (prms[i].type)
+                            {
+                                case AnimatorControllerParameterType.Float: nf++; break;
+                                case AnimatorControllerParameterType.Int: ni++; break;
+                                case AnimatorControllerParameterType.Bool: nb++; break;
+                            }
+                        }
+                        var fp = new float[nf];
+                        var ip = new int[ni];
+                        var bp = new bool[nb];
+                        int a = 0, b = 0, c = 0;
+                        for (int i = 0; i < prms.Length; i++)
+                        {
+                            switch (prms[i].type)
+                            {
+                                case AnimatorControllerParameterType.Float: fp[a++] = anim.GetFloat(prms[i].name); break;
+                                case AnimatorControllerParameterType.Int: ip[b++] = anim.GetInteger(prms[i].name); break;
+                                case AnimatorControllerParameterType.Bool: bp[c++] = anim.GetBool(prms[i].name); break;
+                            }
+                        }
+                        state.FloatParams = fp;
+                        state.IntParams = ip;
+                        state.BoolParams = bp;
+                    }
+                    catch { /* 参数读不到就跳过，层状态照发 */ }
                 }
 
                 // 状态日志单独节流（以前借用 _captureRateLimit，捕获成功后它不再清零 → 每帧刷屏）
@@ -431,15 +490,21 @@ namespace RL2Multiplayer
             interpolator.SetTarget(newTarget, facingRight);
         }
 
-        /// <summary>动画包（10Hz，Sequenced）：分身不存在时静默丢弃，等位置包把它建出来。</summary>
-        public void HandleRemoteAnim(int id, int animHash, float animTime)
+        /// <summary>动画包（10Hz）：分身不存在时静默丢弃，等位置包把它建出来。</summary>
+        public void HandleRemoteAnim(int id, int[] layerHashes, float[] layerTimes, float[] floatParams, int[] intParams, bool[] boolParams)
         {
             GameObject go;
             RemotePlayerInterpolator interpolator;
             if (!RemotePlayers.TryGetValue(id, out go) || go == null) return;
             interpolator = go.GetComponent<RemotePlayerInterpolator>();
             if (interpolator == null) return;
-            interpolator.SetAnimTarget(animHash, animTime);
+            interpolator.SetAnimTarget(layerHashes, layerTimes, floatParams, intParams, boolParams);
+        }
+
+        /// <summary>旧签名（调试模拟等只用第 0 层的调用方）。</summary>
+        public void HandleRemoteAnim(int id, int animHash, float animTime)
+        {
+            HandleRemoteAnim(id, new int[] { animHash }, new float[] { animTime }, null, null, null);
         }
 
         /// <summary>状态位包（变化时才发，Reliable）：倒地/起身。</summary>
@@ -919,9 +984,14 @@ namespace RL2Multiplayer
         private float _visualFacingScaleX;
         private bool _frozen;
 
-        // 网络送来的动画状态（由 RemoteAnimatorMirror 消费）
-        internal int TargetAnimHash;
-        internal float TargetAnimTime;
+        // 网络送来的动画状态（由 RemoteAnimatorMirror 消费）—— v1.6.3 全层 + 参数
+        internal int[] TargetLayerHashes = new int[0];
+        internal float[] TargetLayerTimes = new float[0];
+        internal float[] TargetFloatParams;
+        internal int[] TargetIntParams;
+        internal bool[] TargetBoolParams;
+        /// <summary>收到动画包的时刻（unscaled）。镜像组件用它预测当前应处的动画时间。</summary>
+        internal float AnimPacketTime;
 
         private const float LerpSpeed = 18f;
 
@@ -954,8 +1024,20 @@ namespace RL2Multiplayer
         /// <summary>记录网络送来的动画状态（hash=0 表示无数据，镜像组件会降级为待机/本地镜像）。</summary>
         public void SetAnimTarget(int hash, float time)
         {
-            TargetAnimHash = hash;
-            TargetAnimTime = time;
+            TargetLayerHashes = new int[] { hash };
+            TargetLayerTimes = new float[] { time };
+            AnimPacketTime = Time.unscaledTime;
+        }
+
+        /// <summary>v1.6.3：全层 + 参数快照（10Hz 网络包解析结果）。</summary>
+        public void SetAnimTarget(int[] layerHashes, float[] layerTimes, float[] floatParams, int[] intParams, bool[] boolParams)
+        {
+            TargetLayerHashes = layerHashes ?? new int[0];
+            TargetLayerTimes = layerTimes ?? new float[0];
+            TargetFloatParams = floatParams;
+            TargetIntParams = intParams;
+            TargetBoolParams = boolParams;
+            AnimPacketTime = Time.unscaledTime;
         }
 
         /// <summary>
@@ -1026,8 +1108,12 @@ namespace RL2Multiplayer
         private readonly List<AnimPair> _animPairs = new List<AnimPair>();
         private readonly List<FxPair> _fxPairs = new List<FxPair>();
         private RemotePlayerInterpolator _interp;
-        private const float ResyncThreshold = 0.18f;       // 循环状态允许的时间漂移
+        private const float ResyncThreshold = 0.18f;       // 循环状态允许的时间漂移（本地全量镜像用）
         private const float OneShotRestartGap = 0.05f;     // 一次性状态判定"本地重新开始"的回卷幅度
+        private const float NetLoopDrift = 0.3f;           // 网络循环动画允许的绝对时间漂移
+        private const float NetLoopResyncGap = 0.5f;       // 网络循环动画两次重对时的最小间隔
+        private const float NetOneShotResyncGap = 0.3f;    // 网络一次性动画两次重播的最小间隔
+        private readonly float[] _lastResync = new float[16]; // 每层上次对网络动画执行 Play 的时刻
         private float _disableListTimer;                   // 克隆体效果禁用列表重申计时
 
         /// <summary>
@@ -1116,9 +1202,9 @@ namespace RL2Multiplayer
 
             try
             {
-                if (_interp != null && _interp.TargetAnimHash != 0)
+                if (_interp != null && _interp.TargetLayerHashes != null && _interp.TargetLayerHashes.Length > 0)
                 {
-                    // 真实联机：网络只送了主 Animator 第 0 层，至少保证跑/跳跟随
+                    // 真实联机：网络送来所有层的状态 + 参数（v1.6.3）
                     ApplyNetworkAnim();
                 }
                 else
@@ -1228,34 +1314,120 @@ namespace RL2Multiplayer
             }
         }
 
-        /// <summary>真实联机兜底：网络数据只有主 Animator 第 0 层。</summary>
+        /// <summary>
+        /// 真实联机：网络送来所有层的状态 + 参数。
+        ///
+        /// 网络包是 10Hz 的，数据到手已落后一个网络延迟，直接拿"过期目标"比较会
+        /// 频繁重对时（v1.6.2 修过的抽搐）。这里按"包到达时刻 + 已流逝时间"预测
+        /// 当前应处的动画时间；循环态比绝对时间（不回卷），一次性态保留重启检测，
+        /// 并按层加最小重对时间隔。
+        /// </summary>
         private void ApplyNetworkAnim()
         {
             if (_animPairs.Count == 0 || _animPairs[0].Clone == null) return;
             var cl = _animPairs[0].Clone;
-            int hash = _interp.TargetAnimHash;
-            float t = _interp.TargetAnimTime;
 
-            var ci = cl.GetCurrentAnimatorStateInfo(0);
-            if (hash != ci.shortNameHash)
+            // 参数每帧套用：blend tree / 层权重由参数驱动，攻击方向、蓄力等靠它
+            ApplyParams(cl);
+
+            var hashes = _interp.TargetLayerHashes;
+            var times = _interp.TargetLayerTimes;
+            if (hashes == null || hashes.Length == 0) return;
+
+            // 预测此刻的归一化时间（最多预测 0.3s，丢包时别让预测飞出去）
+            float age = Time.unscaledTime - _interp.AnimPacketTime;
+            if (age < 0f) age = 0f;
+            if (age > 0.3f) age = 0.3f;
+
+            float now = Time.unscaledTime;
+            int layers = Mathf.Min(cl.layerCount, hashes.Length);
+            layers = Mathf.Min(layers, _lastResync.Length);
+
+            for (int l = 0; l < layers; l++)
             {
-                cl.Play(hash, 0, t);
-                return;
+                int hash = hashes[l];
+                float t = times[l];
+                if (hash == 0) continue; // 该层无数据（无状态机/同步层）
+
+                AnimatorStateInfo ci;
+                try { ci = cl.GetCurrentAnimatorStateInfo(l); }
+                catch { continue; }
+
+                bool loop = ci.loop;
+                float predN = t + (loop ? age : 0f);
+                float predF = predN - Mathf.Floor(predN);
+
+                if (hash != ci.shortNameHash)
+                {
+                    // 状态切换（含攻击/冲刺进入更高层）：立即播新状态并对齐时间
+                    cl.Play(hash, l, predN);
+                    _lastResync[l] = now;
+                    continue;
+                }
+
+                float curN = ci.normalizedTime;
+                float curF = curN - Mathf.Floor(curN);
+
+                if (loop)
+                {
+                    // 循环状态（跑/待机）：比绝对时间。绝对时间单调递增，没有回卷误判。
+                    if (Mathf.Abs(predN - curN) > NetLoopDrift && now - _lastResync[l] >= NetLoopResyncGap)
+                    {
+                        cl.Play(hash, l, predN);
+                        _lastResync[l] = now;
+                    }
+                    continue;
+                }
+
+                // 一次性状态（攻击/冲刺/翻滚）：绝不中途重启。两种情况需要重对时：
+                // a) 分身已播完而本地还在播（normalizedTime 停在 1.0）
+                // b) 本地重新开始了（连击快速连打，目标时间回卷）
+                bool cloneFinished = curN >= 0.99f;
+                bool localStillPlaying = predN < 0.99f;
+                bool localRestarted = (predF < curF) && (curF - predF) > OneShotRestartGap;
+                if ((cloneFinished && localStillPlaying) || localRestarted)
+                {
+                    if (now - _lastResync[l] >= NetOneShotResyncGap)
+                    {
+                        cl.Play(hash, l, predN);
+                        _lastResync[l] = now;
+                    }
+                }
             }
+        }
 
-            float curN = ci.normalizedTime;
-            float curF = curN - Mathf.Floor(curN);
-            float tgtF = t - Mathf.Floor(t);
+        /// <summary>按类型顺序套用参数快照（本地/远端同一 Player_Animator，顺序天然对齐）。</summary>
+        private void ApplyParams(Animator cl)
+        {
+            var fp = _interp.TargetFloatParams;
+            var ip = _interp.TargetIntParams;
+            var bp = _interp.TargetBoolParams;
+            if (fp == null && ip == null && bp == null) return;
 
-            bool cloneFinished = curN >= 0.99f;
-            bool localStillPlaying = t < 0.99f;
-            bool localRestarted = (tgtF < curF) && (curF - tgtF) > OneShotRestartGap;
-            bool drift = Mathf.Abs(tgtF - curF) > ResyncThreshold && Mathf.Abs(tgtF - curF) < 1f - ResyncThreshold;
-
-            if ((cloneFinished && localStillPlaying) || localRestarted || drift)
+            try
             {
-                cl.Play(hash, 0, t);
+                var prms = cl.parameters;
+                int a = 0, b = 0, c = 0;
+                for (int i = 0; i < prms.Length; i++)
+                {
+                    switch (prms[i].type)
+                    {
+                        case AnimatorControllerParameterType.Float:
+                            if (fp != null && a < fp.Length) cl.SetFloat(prms[i].nameHash, fp[a]);
+                            a++;
+                            break;
+                        case AnimatorControllerParameterType.Int:
+                            if (ip != null && b < ip.Length) cl.SetInteger(prms[i].nameHash, ip[b]);
+                            b++;
+                            break;
+                        case AnimatorControllerParameterType.Bool:
+                            if (bp != null && c < bp.Length) cl.SetBool(prms[i].nameHash, bp[c]);
+                            c++;
+                            break;
+                    }
+                }
             }
+            catch { /* 参数表对不上时静默跳过 */ }
         }
 
         /// <summary>粒子特效播放状态同步：冲刺拖尾/法术光效/攻击火花。</summary>

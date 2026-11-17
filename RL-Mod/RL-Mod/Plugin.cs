@@ -10,7 +10,7 @@ using UnityEngine.SceneManagement;
 
 namespace RL2Multiplayer
 {
-    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "1.6.1")]
+    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "1.7.5")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -25,6 +25,41 @@ namespace RL2Multiplayer
 
         internal static void SetDebugMode(bool value) { DebugMode = value; }
 
+        /// <summary>
+        /// Harmony 补丁失败时的完整错误描述。
+        /// HarmonyX 把所有补丁异常统一包成 "IL Compile Error (unknown location)"，
+        /// 真正的原因在 InnerException 里 —— 只打 ex.Message 永远查不出问题。
+        /// </summary>
+        internal static string PatchError(Exception ex)
+        {
+            try
+            {
+                var sb = new System.Text.StringBuilder();
+                var cur = ex;
+                int depth = 0;
+                while (cur != null && depth < 4)
+                {
+                    if (depth > 0) sb.Append("  <- 内层: ");
+                    sb.Append('[').Append(cur.GetType().Name).Append("] ").Append(cur.Message);
+                    cur = cur.InnerException;
+                    depth++;
+                }
+                var st = ex.StackTrace;
+                if (st != null)
+                {
+                    var first = st.Split('\n');
+                    if (first.Length > 0) sb.Append("  | at ").Append(first[0].Trim());
+                }
+                if (ex.InnerException != null && ex.InnerException.StackTrace != null)
+                {
+                    var ist = ex.InnerException.StackTrace.Split('\n');
+                    if (ist.Length > 0) sb.Append("  | inner at ").Append(ist[0].Trim());
+                }
+                return sb.ToString();
+            }
+            catch { return ex.Message; }
+        }
+
         private Harmony _harmony;
 
         private void Awake()
@@ -32,7 +67,7 @@ namespace RL2Multiplayer
             Log = Logger;
             Instance = this;
 
-            Log.LogInfo("[RL2MP] === Plugin Awake START (v1.6.1) ===");
+            Log.LogInfo("[RL2MP] === Plugin Awake START (v1.7.5) ===");
 
             Log.LogInfo("[RL2MP] Binding BepInEx config entries...");
             HostAddressCfg = Config.Bind<string>("Network", "HostAddress", "127.0.0.1", "主机 IP 地址（客户端连接时使用）");
@@ -48,6 +83,8 @@ namespace RL2Multiplayer
             SeedSync.Apply(_harmony);
             RacePatches.Apply(_harmony);
             ScorePatches.Apply(_harmony);
+            ProjectileSync.Apply(_harmony);
+            RoomFix.Apply(_harmony);
             MapSync.ApplyPatches(_harmony);
             RaceRulesSync.ApplySaveProtection(_harmony);
             Bootstrap.ApplyLateInitPatch(_harmony);

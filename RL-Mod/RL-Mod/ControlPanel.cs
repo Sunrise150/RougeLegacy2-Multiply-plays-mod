@@ -310,6 +310,15 @@ namespace RL2Multiplayer
 
             GUILayout.Space(8);
             GUILayout.BeginHorizontal();
+            if (GUILayout.Button(RaceHud.ForceShow ? "收起计分板预览" : "调整计分板位置", GUILayout.Width(130)))
+            {
+                RaceHud.ForceShow = !RaceHud.ForceShow;
+            }
+            GUILayout.Label("（显示后可拖动窗口、拖右下角缩放，位置自动记住）");
+            GUILayout.EndHorizontal();
+
+            GUILayout.Space(8);
+            GUILayout.BeginHorizontal();
             GUILayout.Label("小键盘1 / F7 显示隐藏  |", GUILayout.Width(155));
             GUILayout.Label("小键盘2 主机  3 客户端  4 停止");
             GUILayout.EndHorizontal();
@@ -389,6 +398,11 @@ namespace RL2Multiplayer
                             Race.ToggleLocalReady();
                         }
                     }
+                    if (Race.Phase == RacePhase.Racing
+                        && GUILayout.Button("调试: 直接判定我完赛（胜利）", GUILayout.Height(22)))
+                    {
+                        Race.DebugForceLocalFinish();
+                    }
                 }
                 else
                 {
@@ -450,12 +464,20 @@ namespace RL2Multiplayer
                 if (ScoreIntRow("探索新房间 +", ref Score.RoomPoints, 5, 0, 5000, "")) Score.BroadcastConfig();
                 if (ScoreIntRow("击杀怪物 +", ref Score.EnemyPoints, 1, 0, 500, "")) Score.BroadcastConfig();
                 if (ScoreIntRow("击败 Boss +", ref Score.BossPoints, 50, 0, 20000, "")) Score.BroadcastConfig();
+                if (ScoreIntRow("开普通箱 +", ref Score.ChestBronzePoints, 10, 0, 5000, "")) Score.BroadcastConfig();
+                if (ScoreIntRow("开银箱 +", ref Score.ChestSilverPoints, 10, 0, 5000, "")) Score.BroadcastConfig();
+                if (ScoreIntRow("开金箱 +", ref Score.ChestGoldPoints, 10, 0, 5000, "")) Score.BroadcastConfig();
+                if (ScoreIntRow("开妖精箱 +", ref Score.ChestFairyPoints, 10, 0, 5000, "")) Score.BroadcastConfig();
                 if (ScoreIntRow("拾取遗物 -", ref Score.RelicPenalty, 10, 0, 5000, "")) Score.BroadcastConfig();
                 if (ScoreIntRow("死亡一次 -", ref Score.DeathPenalty, 25, 0, 10000, "")) Score.BroadcastConfig();
                 if (ScoreIntRow("每分钟衰减 -", ref Score.DecayPerMinute, 5, 0, 2000, "")) Score.BroadcastConfig();
+                if (ScoreIntRow("金币/分(NG+0) ", ref Score.GoldPerPoint, 1000, 1000, 1000000, "")) Score.BroadcastConfig();
+                GUILayout.Label("完赛时把本局金币折算成分：NG+0 为 " + Score.GoldPerPoint
+                    + " 金币 = 1 分，当前周目(NG+" + Score.CurrentNgPlus() + ") 实际 "
+                    + Score.EffectiveGoldPerPoint() + " 金币 = 1 分");
                 GUILayout.BeginHorizontal();
                 if (GUILayout.Button("恢复默认", GUILayout.Width(80))) Score.ResetDefaults();
-                GUILayout.Label("同一房间反复进不重复计分");
+                GUILayout.Label("同一房间/同一个箱子反复进不重复计分");
                 GUILayout.EndHorizontal();
             }
 
@@ -532,6 +554,10 @@ namespace RL2Multiplayer
                         if (!sl.Finished) sl.Dnf = true;
                     }
                     Race.Arbitrate();
+                }
+                if (GUILayout.Button("调试: 直接判定我完赛（胜利）", GUILayout.Height(22)))
+                {
+                    Race.DebugForceLocalFinish();
                 }
             }
 

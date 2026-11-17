@@ -25,6 +25,18 @@ namespace RL2Multiplayer
         /// <summary>倒地瞬间的位置，用于复活时把人放回原地。</summary>
         internal static Vector3 LastAlivePos;
 
+        /// <summary>本次死亡的坐标（KillCharacter 被拦截的那一帧记录，v1.7.2）。</summary>
+        internal static Vector3 DeathPos = Vector3.zero;
+
+        /// <summary>
+        /// 本地玩家最后一次"稳站地面"的坐标。v1.7.2 由我们自己每 0.2s 采样，
+        /// 不再依赖 Corgi 的 LastStandingPosition —— 后者只在特定图层的落脚面上更新，
+        /// 实测进房间后长时间不刷新，导致第一次死亡被送回房间入口（上次的目标点）。
+        /// </summary>
+        internal static Vector3 TrackedGroundedPos = Vector3.zero;
+
+        private static float _trackTimer;
+
         private static CinemachineVirtualCameraManager _vcam;
         private static Transform _lastFollow;
         private static float _refollowTimer;
@@ -33,6 +45,14 @@ namespace RL2Multiplayer
         private static float _aggroClearTimer;
         private static float _roomCheckTimer;
         private static BaseRoom _spectatedRoom;
+        /// <summary>复活后仇恨压制窗截止时刻（unscaled）：窗内每 0.5s 再清一次索敌。</summary>
+        private static float _aggroSuppressionUntil;
+        private static float _aggroFailLogTime;
+        /// <summary>倒地观战期间冻结角色物理的计时（防坠落速度累积）。</summary>
+        private static float _freezeTimer;
+        /// <summary>复活后临时打开 DisableDoorBlock 的截止时刻：门判定原本会因
+        /// MovementDisabled/Stunned 把玩家钳回门口，复活瞬间状态可能还没干净。</summary>
+        private static float _doorBlockUntil;
         // 观战期间被我们手动激活的房间（正常游戏里房间进出由门触发器管理，
         // 我们绕过了它，所以退出观战时要自己把这些房间关回去，否则里面的
         // 怪会一直活着跨房间追人 —— 这正是"下个房间的怪跑到上个房间打我"的来源）
@@ -44,7 +64,9 @@ namespace RL2Multiplayer
             {
                 var nm = NetworkManager.Instance;
                 if (nm == null) return false;
-                return nm.Connected || Plugin.DebugMode;
+                // 用"已入局"标志而不是 Connected：断线重连、主机结束对局后网络会停，
+                // 但整局仍算联机对局，死亡必须继续走复活，不能掉回单机真死。
+                return nm.SessionActive || nm.Connected || Plugin.DebugMode;
             }
         }
 
@@ -198,15 +220,123 @@ namespace RL2Multiplayer
                 {
                     var e = enemies[i];
                     if (e == null) continue;
-                    if (e.Target != null) { e.Target = null; cleared++; }
+                    // 场景切换瞬间敌人可能正在销毁，访问 Target 会抛 NRE —— 逐个隔离
+                    try
+                    {
+                        if (e.Target != null) { e.Target = null; cleared++; }
+                    }
+                    catch { }
                 }
                 if (cleared > 0)
                     Plugin.Log.LogInfo("[RL2MP] [DOWN] 清除 " + cleared + " 个敌人的仇恨（玩家已倒地）。");
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [DOWN] ClearEnemyAggro failed: " + ex.Message);
+                // 场景卸载时 FindObjectsOfType 本身可能抛异常；保护窗内每 0.5s 调一次，
+                // 不能刷屏 —— 只在间隔超过 5s 时记录一次
+                if (Time.unscaledTime - _aggroFailLogTime > 5f)
+                {
+                    _aggroFailLogTime = Time.unscaledTime;
+                    Plugin.Log.LogWarning("[RL2MP] [DOWN] ClearEnemyAggro failed: " + ex.Message);
+                }
             }
+        }
+
+        /// <summary>
+        /// 把本地角色的物理速度清零（倒地观战期间每 0.1s 调一次）。
+        /// 角色虽然被 SetActive(false)，但 Corgi 的 _velocity 字段还会保留死亡瞬间的值
+        /// （坠落/击退/虚空冲刺），复活时原样带回 —— 这是"复活后速度很快"的来源之一。
+        /// </summary>
+        private static void FreezeLocalBody()
+        {
+            try
+            {
+                var ps = PS;
+                var pc = ps != null ? ps.LocalPlayer as PlayerController : null;
+                if (pc == null) return;
+                pc.SetVelocity(0f, 0f, false);
+                if (pc.ControllerCorgi != null) pc.ControllerCorgi.SetForce(Vector2.zero);
+                if (pc.CharacterDash != null && pc.CharacterDash.IsDashing) pc.CharacterDash.StopDash();
+            }
+            catch { }
+        }
+
+        // ---------------- 复活点采样 ----------------
+
+        /// <summary>
+        /// 每帧（节流 0.2s）采样：活着、站在地上、在房间里时记一笔坐标。
+        /// 复活时"掉坑/掉刺/在空气墙外死亡"就靠这个点兜底。
+        /// </summary>
+        internal static void TrackBody()
+        {
+            if (LocalDown) return;
+            _trackTimer += Time.unscaledDeltaTime;
+            if (_trackTimer < 0.2f) return;
+            _trackTimer = 0f;
+
+            try
+            {
+                var ps = PS;
+                var pc = ps != null ? ps.LocalPlayer as PlayerController : null;
+                if (pc == null) return;
+                if (pc.CurrentHealth <= 0f) return;
+
+                var corgi = pc.ControllerCorgi;
+                if (corgi == null || corgi.State == null) return;
+                if (!corgi.State.IsGrounded) return;
+                if (pc.CurrentlyInRoom == null) return;
+
+                TrackedGroundedPos = pc.transform.position;
+            }
+            catch { /* 采样失败无所谓，还有死亡坐标兜底 */ }
+        }
+
+        /// <summary>
+        /// v1.7.2：复活后把周围怪物的目标重新绑回本地玩家。
+        ///
+        /// 旧逻辑在复活时把敌人的 Target 清成 null，但敌人只在 Awake/初始化时
+        /// （EnemyController.Start 里 m_target = PlayerManager.GetPlayer()）拿一次目标，
+        /// 之后没有任何地方会重新索敌 —— 结果就是复活后怪彻底失去目标：
+        /// 移动回到默认巡逻轨迹（"不跟人物走了"）、AI 的攻击分支全部因为 !Target 短路，
+        /// 表现成"怪不打人了"。这里按游戏自己的赋值方式补回来。
+        /// </summary>
+        internal static void RebindEnemyTargets()
+        {
+            var ps = PS;
+            var playerGo = ps != null ? ps.CachedLocalPlayerObject : null;
+            if (playerGo == null) return;
+
+            int fixedCount = 0;
+            try
+            {
+                var enemies = UnityEngine.Object.FindObjectsOfType<EnemyController>();
+                for (int i = 0; i < enemies.Length; i++)
+                {
+                    var e = enemies[i];
+                    if (e == null) continue;
+                    try
+                    {
+                        if (e.Target == null)
+                        {
+                            e.Target = playerGo;
+                            fixedCount++;
+                        }
+                    }
+                    catch { /* 单个敌人异常不能影响其他敌人 */ }
+                }
+            }
+            catch (Exception ex)
+            {
+                if (Time.unscaledTime - _aggroFailLogTime > 5f)
+                {
+                    _aggroFailLogTime = Time.unscaledTime;
+                    Plugin.Log.LogWarning("[RL2MP] [DOWN] RebindEnemyTargets failed: " + ex.Message);
+                }
+                return;
+            }
+
+            if (fixedCount > 0)
+                Plugin.Log.LogInfo("[RL2MP] [DOWN] 复活后重新索敌：" + fixedCount + " 个怪物重新锁定本地玩家。");
         }
 
         // ---------------- 观战房间激活 ----------------
@@ -294,11 +424,29 @@ namespace RL2Multiplayer
             SpectateTargetId = -1;
             _stuckTimer = 0f;
 
+            // 倒地瞬间就把速度清掉，别让坠落/击退速度在 Corgi 里挂一整段观战时间
+            FreezeLocalBody();
+
             var ps = PS;
             var go = ps != null ? ps.CachedLocalPlayerObject : null;
             if (go != null)
             {
-                LastAlivePos = go.transform.position;
+                // v1.6.2：优先用 Corgi 记录的"最后站立位置"。死亡瞬间的坐标可能在
+                // 坑底/空中/尖刺里 —— 用它复活会立刻再死一次，无限循环的表现就是
+                // "死了之后一直没有站起来"。
+                var pcDown = ps != null ? ps.LocalPlayer as PlayerController : null;
+                try
+                {
+                    if (DeathPos != Vector3.zero) LastAlivePos = DeathPos;
+                    else
+                    {
+                        var lsp = (pcDown != null && pcDown.ControllerCorgi != null)
+                            ? pcDown.ControllerCorgi.LastStandingPosition
+                            : Vector3.zero;
+                        LastAlivePos = lsp != Vector3.zero ? lsp : go.transform.position;
+                    }
+                }
+                catch { LastAlivePos = go.transform.position; }
                 // 关键：把角色整个停掉。游戏靠 Update 里的血量检查推进死亡流程，
                 // 对象不 active 就不会有人去开死亡界面。
                 go.SetActive(false);
@@ -320,6 +468,77 @@ namespace RL2Multiplayer
         }
 
         /// <summary>
+        /// v1.7.2：选出复活坐标。
+        ///  1) 死亡坐标在房间内 -> 就用它（用户要的"死在哪儿、活在哪"）；
+        ///     但如果最后站稳点离得很近（&lt;3m），用站稳点，避免正好复活在尖刺尖上/墙里。
+        ///  2) 死亡坐标在房间外（掉坑、掉虚空）-> 用最后站稳点；它也不在房间内则钳进房间。
+        /// </summary>
+        private static Vector3 PickRespawnPos(BaseRoom room, Vector3 deathPos)
+        {
+            Vector3 pos = deathPos;
+
+            bool deathInside = InsideRoom(room, deathPos, 0.5f);
+            if (deathInside)
+            {
+                Vector3 g = TrackedGroundedPos;
+                if (g != Vector3.zero && InsideRoom(room, g, 0.5f))
+                {
+                    float dx = Mathf.Abs(g.x - deathPos.x);
+                    float dy = Mathf.Abs(g.y - deathPos.y);
+                    if (dx <= 3f && dy <= 3f) pos = g;
+                }
+            }
+            else
+            {
+                Vector3 g = TrackedGroundedPos;
+                if (g != Vector3.zero && InsideRoom(room, g, 0.5f))
+                {
+                    pos = g;
+                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 死亡点不在房间内，改用最后站稳点 ("
+                        + g.x.ToString("F1") + "," + g.y.ToString("F1") + ")。");
+                }
+                else if (room != null)
+                {
+                    pos = ClampIntoRoom(room, deathPos);
+                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 没有可用的站稳点，把死亡点钳进房间 ("
+                        + pos.x.ToString("F1") + "," + pos.y.ToString("F1") + ")。");
+                }
+            }
+
+            return room != null ? ClampIntoRoom(room, pos) : pos;
+        }
+
+        private static bool InsideRoom(BaseRoom room, Vector3 worldPos, float margin)
+        {
+            if (room == null) return false;
+            try
+            {
+                Bounds b = room.Bounds;
+                if (b.size.x <= 0.01f || b.size.y <= 0.01f) return false;
+                return worldPos.x >= b.min.x + margin && worldPos.x <= b.max.x - margin
+                    && worldPos.y >= b.min.y + margin && worldPos.y <= b.max.y - margin;
+            }
+            catch { return false; }
+        }
+
+        private static Vector3 ClampIntoRoom(BaseRoom room, Vector3 worldPos)
+        {
+            Vector3 pos = worldPos;
+            try
+            {
+                Bounds b = room.Bounds;
+                const float margin = 1.5f;
+                if (b.size.x > 3f && b.size.y > 3f)
+                {
+                    pos.x = Mathf.Clamp(pos.x, b.min.x + margin, b.max.x - margin);
+                    pos.y = Mathf.Clamp(pos.y, b.min.y + margin, b.max.y - margin);
+                }
+            }
+            catch { }
+            return pos;
+        }
+
+        /// <summary>
         /// v1.6.1 关键修复：复活时**绝对不能**调 room.PlacePlayerInRoom()。
         /// 反编译确认它的 End 阶段会执行：
         ///   InitializeSpawnControllerInstances() —— 对每个怪刷怪器重新 GetEnemyFromPool()：
@@ -332,14 +551,88 @@ namespace RL2Multiplayer
         /// </summary>
         private static void RespawnInCurrentRoom(PlayerController pc, GameObject go, Vector3 worldPos)
         {
-            go.transform.position = worldPos;
+            BaseRoom room = null;
+            try { room = pc != null ? pc.CurrentlyInRoom : null; } catch { }
+            // CurrentlyInRoom 丢失时按坐标反查房间，否则后续门触发器/相机都无从对齐
+            if (room == null)
+            {
+                try { room = FindRoomContaining(worldPos); } catch { }
+            }
 
+            Vector3 pos = worldPos;
+            bool usedDeath = true;
             try
             {
-                var room = pc.CurrentlyInRoom;
-                if (room != null && !room.gameObject.activeSelf) room.gameObject.SetActive(true);
+                Vector3 picked = PickRespawnPos(room, worldPos);
+                usedDeath = (picked - worldPos).sqrMagnitude < 0.01f;
+                pos = picked;
             }
-            catch { /* 房间引用异常不影响瞬移 */ }
+            catch { }
+
+            Plugin.Log.LogInfo("[RL2MP] [DOWN] 复活落点 (" + pos.x.ToString("F1") + "," + pos.y.ToString("F1")
+                + ") 来源=" + (usedDeath ? "死亡点" : "最后站稳点")
+                + " 传入=(" + worldPos.x.ToString("F1") + "," + worldPos.y.ToString("F1") + ")"
+                + " 房间=" + (room != null ? room.name : "<none>"));
+
+            // 走游戏自己的 EnterRoom：只负责 CurrentlyInRoom / LastStandingPosition /
+            // TimeEnteredRoom / 房间激活 / 射线复位协程，不会重刷怪（那是 PlacePlayerInRoom 的副作用）。
+            // 必须在 EnterRoom 之前记录：EnterRoom 会把关闭的房间 SetActive(true)。
+            bool wasActive = true;
+            try { wasActive = room != null && room.gameObject.activeInHierarchy; } catch { }
+
+            bool entered = false;
+            if (room != null)
+            {
+                try
+                {
+                    pc.EnterRoom(room, null, room.transform.InverseTransformPoint(pos));
+                    entered = true;
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("[RL2MP] [DOWN] EnterRoom 失败（退回直接瞬移）: " + ex.Message);
+                }
+            }
+            if (!entered) go.transform.position = pos;
+
+            // v1.7.3 关键修复：EnterRoom 只做"瞬移 + 记房间"，不广播"玩家进入房间"事件，
+            // 而门的出口触发器恰恰只在收到该事件时才 SetTriggerActive(true)。
+            // 不补这一下，只要有一次换房被打断（门口死亡/瞬移/掉坑），全场门都会停在
+            // 关闭状态 —— 玩家站在门口按方向键毫无反应，就是"无法进入下一个房间"。
+            //
+            // v1.7.4：如果房间本来已经被 SetActive(false)（在门口/换房瞬间死亡就会这样），
+            // EnterRoom 会把它重新激活，但**不会**借出敌人、不会切相机、不会广播事件 ——
+            // 这正是"回到有怪的房间：视角动不了 + 怪全没了"的成因。这种情况必须把
+            // PlacePlayerInRoom_End 的剩余步骤补完（怪/背景/存档/相机/事件）。
+            if (room != null)
+            {
+                if (!wasActive)
+                {
+                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 复活时房间 '" + room.name
+                        + "' 处于关闭状态（怪已被回收），补完房间初始化。");
+                    RoomFix.CompleteRoomActivation(room, pos, true);
+                }
+                else
+                {
+                    RoomFix.MarkEntered(room, null);
+                }
+
+                // 复活后重新体检一次（相机 + 是否有怪被回收成空房间）
+                RoomFix.RequestVerify();
+            }
+
+            // 清零速度与外力 —— 这是"复活后移动速度过快、掉出空气墙"的根因：
+            // 死亡瞬间角色可能带着坠落速度（实测日志里 vy 到过 -38）、击退或虚空冲刺速度，
+            // 不清掉就会在复活后被保留，一个物理步就能穿过地板/空气墙，门触发器同样会被隧穿。
+            try { pc.SetVelocity(0f, 0f, false); } catch { }
+            try { if (pc.ControllerCorgi != null) pc.ControllerCorgi.SetForce(Vector2.zero); } catch { }
+            try { pc.ExternalKnockbackMod = Vector2.one; pc.InternalKnockbackMod = Vector2.one; } catch { }
+            try
+            {
+                if (pc.CharacterDash != null && pc.CharacterDash.IsDashing)
+                    pc.CharacterDash.StopDash();
+            }
+            catch { }
 
             try
             {
@@ -349,6 +642,23 @@ namespace RL2Multiplayer
             {
                 Plugin.Log.LogWarning("[RL2MP] [DOWN] Corgi 射线复位失败（已瞬移，仅射线未刷新）: " + ex.Message);
             }
+
+            // 相机对齐房间：复活点可能在房间边缘，不刷新的话相机会停在上一段的边界
+            try
+            {
+                if (room != null)
+                    CameraController.UpdateRoomCameraSettings(new RoomViaDoorEventArgs(room, null));
+            }
+            catch { /* 相机失败不影响复活 */ }
+
+            // 复活后 2 秒内不对门口做"眩晕/禁移"拦截：门判定里 ConditionState=Stunned 或
+            // MovementDisabled 会把玩家钳回门口、拒绝换房，而刚复活那一两帧状态未必干净。
+            try
+            {
+                pc.DisableDoorBlock = true;
+                _doorBlockUntil = Time.unscaledTime + 2f;
+            }
+            catch { }
         }
 
         /// <summary>退出观战时把观战期间手动激活的房间关回去（玩家当前所在房间除外）。</summary>
@@ -379,6 +689,8 @@ namespace RL2Multiplayer
         {
             if (!LocalDown) return;
             LocalDown = false;
+            // 复活后必须关掉真死放行，否则下一次死亡会直接走游戏原生死亡（回城堡）
+            AllowRealDeath = false;
             SpectateTargetId = -1;
             _spectatedRoom = null;
 
@@ -395,6 +707,8 @@ namespace RL2Multiplayer
                     // 直接进"复活 -> 立刻再倒地"死循环。
                     try
                     {
+                        // v1.7.4：观战/真实死亡路径会真的置 IsDead，之后门全部失效（PlayerExit 首行就 return）
+                        pc.ResetIsDead();
                         pc.SetHealth(pc.ActualMaxHealth, additive: false, runEvents: true);
                         Plugin.Log.LogInfo("[RL2MP] [DOWN] 复活回满血: " + pc.ActualMaxHealth);
                     }
@@ -421,8 +735,9 @@ namespace RL2Multiplayer
                 // v1.6.1：原地瞬移复活，不再走 PlacePlayerInRoom（会重刷怪物/复活死怪）
                 RespawnInCurrentRoom(pc, go, LastAlivePos);
 
-                // 复活瞬间清一次仇恨，避免刚站起就被围殴秒杀
-                ClearEnemyAggro();
+                // v1.7.2：观战期间尸体被隐藏，复活后把怪物重新锁回玩家（否则一辈子不打人）
+                _aggroSuppressionUntil = 0f;
+                RebindEnemyTargets();
                 // 观战期间激活过的房间全部关回去（防止那些房间的怪跨房间追人）
                 RestoreSpectateRooms(pc);
                 Follow(go.transform);
@@ -438,6 +753,11 @@ namespace RL2Multiplayer
         /// </summary>
         internal static void QuickRespawn(string reason)
         {
+            // 已经死过一次的残留状态一律清掉：AllowRealDeath 如果还留着 true，
+            // 之后每一次死亡都会直接放行成真死（"客机死亡后直接结束/回城堡"就是这个）。
+            AllowRealDeath = false;
+            LocalDown = false;
+
             var ps = PS;
             var go = ps != null ? ps.CachedLocalPlayerObject : null;
             var pc = ps != null ? ps.LocalPlayer as PlayerController : null;
@@ -448,7 +768,19 @@ namespace RL2Multiplayer
             }
 
             if (!go.activeSelf) go.SetActive(true);
-            Vector3 pos = go.transform.position;
+
+            // v1.7.2：复活点用"死亡瞬间坐标"（拦截 KillCharacter 时记下的），
+            // 只有死亡点在房间外（掉坑/虚空）才退回最后站稳点 —— 见 PickRespawnPos。
+            // 旧版直接用 Corgi.LastStandingPosition，而它进房间后常常长时间不刷新，
+            // 第一次死亡会把玩家送回房间入口，第二次才"正常"。
+            Vector3 pos = DeathPos;
+            if (pos == Vector3.zero) pos = go.transform.position;
+
+            // v1.7.4：BaseRoom.PlayerExit 的第一行是 if (playerController.IsDead) return;
+            // 只回血 + ResetStates 不会清 IsDead —— 人看着活着，但**所有门永久失效**，
+            // 就是"客机无法进入下一个房间"。必须显式复位。
+            try { pc.ResetIsDead(); }
+            catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [DOWN] QuickRespawn 清 IsDead 失败: " + ex.Message); }
 
             try { pc.SetHealth(pc.ActualMaxHealth, additive: false, runEvents: true); }
             catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [DOWN] QuickRespawn 回血失败: " + ex.Message); }
@@ -463,7 +795,10 @@ namespace RL2Multiplayer
             try { pc.CharacterHitResponse.SetInvincibleTime(1.5f, additive: false, playInvincibility: false); }
             catch { /* 无敌只是保险，失败无碍 */ }
 
-            ClearEnemyAggro();
+            // v1.7.2：不再清空敌人 Target（清空后游戏没有任何地方会重新索敌 ->
+            // "怪不打人、也不跟人走"）。改为把丢了目标的怪重新锁回本地玩家。
+            _aggroSuppressionUntil = 0f;
+            RebindEnemyTargets();
             Race.OnLocalDeath();
 
             Plugin.Log.LogInfo("[RL2MP] [DOWN] 竞速死亡 -> 立即原地复活 (" + reason + ")，成绩加时。");
@@ -523,6 +858,12 @@ namespace RL2Multiplayer
             _vcam = null;
             _lastFollow = null;
             _spectatedRoom = null;
+            _aggroSuppressionUntil = 0f;
+            _freezeTimer = 0f;
+            // 换场景 = 换楼层，旧的死亡点/落脚点在新区里没有意义
+            DeathPos = Vector3.zero;
+            TrackedGroundedPos = Vector3.zero;
+            RoomFix.Reset(reason);
 
             // 会话重置：观战期间激活的房间全部关回去
             RestoreSpectateRooms(null);
@@ -545,6 +886,47 @@ namespace RL2Multiplayer
         /// <summary>每帧被 DownedManager 调用：维持镜头 + 检查是否该真死。</summary>
         internal static void Tick()
         {
+            // 复活后临时关闭门口拦截，时间到了自动恢复
+            if (_doorBlockUntil > 0f && Time.unscaledTime > _doorBlockUntil)
+            {
+                _doorBlockUntil = 0f;
+                try
+                {
+                    var ps0 = PS;
+                    var pc0 = ps0 != null ? ps0.LocalPlayer as PlayerController : null;
+                    if (pc0 != null) pc0.DisableDoorBlock = false;
+                }
+                catch { }
+            }
+
+            // 倒地期间持续冻结尸体物理：角色还活着（我们拦掉了真死），重力会一直给
+            // Corgi 加速，实测死亡几秒后 vy 能累到 -40。复活时若不清零，角色会以这个
+            // 速度穿地板、穿空气墙出去，门触发器也来不及响应 —— 就是"复活后速度很快"
+            // 的直接来源。这里每 0.1s 清一次，从源头掐断。
+            if (LocalDown)
+            {
+                _freezeTimer += Time.unscaledDeltaTime;
+                if (_freezeTimer >= 0.1f)
+                {
+                    _freezeTimer = 0f;
+                    FreezeLocalBody();
+                }
+            }
+
+            // v1.6.2：复活保护窗。QuickRespawn 只在起立瞬间清一次仇恨，
+            // 怪物 1.5s 无敌一过就重新索敌 -> 刚站起又被围殴秒杀，看起来像
+            // "复活了但马上又死"。保护窗内每 0.5s 再清一次。
+            if (Time.unscaledTime < _aggroSuppressionUntil)
+            {
+                _aggroClearTimer += Time.unscaledDeltaTime;
+                if (_aggroClearTimer >= 0.5f)
+                {
+                    _aggroClearTimer = 0f;
+                    ClearEnemyAggro();
+                }
+                return;
+            }
+
             if (!LocalDown) return;
 
             var target = EnsureTarget();
@@ -641,7 +1023,9 @@ namespace RL2Multiplayer
 
         private void Update()
         {
+            DownedState.TrackBody();
             DownedState.Tick();
+            RoomFix.Tick();
 
             if (!DownedState.LocalDown) return;
 
@@ -685,7 +1069,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [DOWN] PlayerController patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] PlayerController patch failed: " + Plugin.PatchError(ex));
             }
 
             if (!patched)
@@ -706,7 +1090,7 @@ namespace RL2Multiplayer
                 }
                 catch (Exception ex)
                 {
-                    Plugin.Log.LogWarning("[RL2MP] [DOWN] BaseCharacterController patch failed: " + ex.Message);
+                    Plugin.Log.LogWarning("[RL2MP] [DOWN] BaseCharacterController patch failed: " + Plugin.PatchError(ex));
                 }
             }
         }
@@ -718,20 +1102,29 @@ namespace RL2Multiplayer
                 // 敌人正常死
                 if (!(__instance is PlayerController)) return true;
 
-                if (!DownedState.InSession) return true;
-                if (DownedState.AllowRealDeath) return true;
+                // 记录死亡坐标：复活点优先用它（"死在原地、原地复活"）。
+                // 只有落在房间外（掉坑/虚空）时才退回最后站稳点。
+                try { DownedState.DeathPos = __instance.transform.position; } catch { }
 
-                // 竞速中：不做倒地观战，直接原地复活 + 加时
-                if (Race.InRacePhase)
+                if (!DownedState.InSession)
                 {
-                    DownedState.QuickRespawn("KillCharacter");
-                    return false;
+                    // 放行真实死亡：整局都不在联机会话里（单机 / 未开房）
+                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 放行真实死亡：不在联机会话中（单机或已开局前）。");
+                    return true;
+                }
+                if (DownedState.AllowRealDeath)
+                {
+                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 放行真实死亡：AllowRealDeath=true（全员倒下/已结束对局）。");
+                    return true;
                 }
 
-                // 已经倒地了就不再做任何事（游戏可能每帧都往尸体上补刀）
-                if (DownedState.LocalDown) return false;
-
-                DownedState.GoDown("KillCharacter");
+                // v1.6.4：联机期间死亡一律立即原地复活。
+                // 旧逻辑只在竞速阶段（Countdown/Racing）复活，竞速结算后死亡会进
+                // 倒地观战 —— 2 人局里另一人还活着，倒地的人永远等不到自动复活，
+                // 只能手动按复活键（真机测试中用户明确反馈这是糟糕体验）。
+                // 非竞速阶段的死亡 QuickRespawn 内部的 OnLocalDeath 会因
+                // Phase != Racing 直接跳过加时记账，不会污染成绩。
+                DownedState.QuickRespawn("KillCharacter");
                 return false;
             }
             catch (Exception ex)

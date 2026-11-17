@@ -84,6 +84,8 @@
     <Compile Include="CharacterSync.cs" />
     <Compile Include="RaceMode.cs" />
     <Compile Include="Score.cs" />
+    <Compile Include="ProjectileSync.cs" />
+    <Compile Include="RoomFix.cs" />
     <Compile Include="Players.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
   </ItemGroup>

@@ -60,7 +60,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [SEED] SeedSync patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [SEED] SeedSync patch failed: " + Plugin.PatchError(ex));
             }
         }
 

@@ -453,24 +453,36 @@ namespace RL2Multiplayer
             if (Phase != RacePhase.Racing) return;
             if (bossId != TargetBossId) return; // 杀的不是终点 Boss
 
+            // 终点 Boss 本身也计入 Boss 击杀分（否则打法鼓励跳过 Boss 刷房）
+            Score.OnBossDefeated(bossId);
+            FinishLocal("终点 Boss 倒下");
+        }
+
+        /// <summary>
+        /// v1.7.2：本地完成竞速的统一出口。
+        /// 顺序很重要：先把本局金币折算成分（"最后把金币换成分"），再读总分上报，
+        /// 否则金币分会漏在赛后结算之外。
+        /// </summary>
+        internal static void FinishLocal(string reason)
+        {
             Roster.SyncSelf();
             var me = Roster.Local;
             if (me == null) return;
             if (me.Finished) return;  // 已经上报过了
 
-            // 终点 Boss 本身也计入 Boss 击杀分（否则打法鼓励跳过 Boss 刷房）
-            Score.OnBossDefeated(bossId);
+            Score.ApplyGoldConversion(reason);
 
             float raw = Time.realtimeSinceStartup - StartRealtime;
             me.FinishTime = raw + LocalPenaltySeconds;
             me.Score = Score.LocalScore;
             LocalFinishTime = me.FinishTime;
 
-            Plugin.Log.LogInfo("[RL2MP] [RACE] 本地完成竞速！Boss=" + BossName(bossId)
+            Plugin.Log.LogInfo("[RL2MP] [RACE] 本地完成竞速（" + reason + "）"
                 + " 净用时 " + FormatTime(raw)
                 + " + 死亡加时 " + FormatTime(LocalPenaltySeconds)
                 + "（" + LocalDeaths + " 次） = " + FormatTime(me.FinishTime)
                 + " | 得分 " + me.Score
+                + "（含金币 " + Score.LocalGoldConverted + " -> +" + Score.LocalCoinPoints + "）"
                 + " | 完赛 " + FinishedCount() + "/" + Roster.Count);
 
             var nm = NetworkManager.Instance;
@@ -485,6 +497,18 @@ namespace RL2Multiplayer
             {
                 nm.SendRaceFinish(me.FinishTime, me.Score);
             }
+        }
+
+        /// <summary>调试按钮：不等 Boss，直接把本地判为完赛（验证结算动画 / 胜负流程）。</summary>
+        internal static void DebugForceLocalFinish()
+        {
+            if (Phase != RacePhase.Racing)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [RACE] 调试完赛失败：当前不在比赛中（Phase=" + Phase + "）。");
+                return;
+            }
+            Plugin.Log.LogInfo("[RL2MP] [RACE] 调试按钮：本地直接判定完赛。");
+            FinishLocal("调试按钮");
         }
 
         // ---------------- 多人结算 ----------------
@@ -947,7 +971,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [RACE] SetBossFlagDefeated patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [RACE] SetBossFlagDefeated patch failed: " + Plugin.PatchError(ex));
             }
         }
 
@@ -1257,7 +1281,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [RULES] save protection patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [RULES] save protection patch failed: " + Plugin.PatchError(ex));
             }
 
             // 读档侧：LoadGameDataAndUpdate(Player) 会把 SaveManager.PlayerSaveData
@@ -1280,7 +1304,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [RULES] LoadGameDataAndUpdate patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [RULES] LoadGameDataAndUpdate patch failed: " + Plugin.PatchError(ex));
             }
 
             // 新周目同步：主机在游戏里开启 NG+（Charon 对话确认）时会调
@@ -1303,7 +1327,7 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [RULES] ResetForNewGamePlus patch failed: " + ex.Message);
+                Plugin.Log.LogWarning("[RL2MP] [RULES] ResetForNewGamePlus patch failed: " + Plugin.PatchError(ex));
             }
         }
 
@@ -1417,80 +1441,57 @@ namespace RL2Multiplayer
         private static GUIStyle _scoreHot;
         private static GUIStyle _center;
 
+        // ---------------- v1.7.3：可拖动 / 可缩放的计分板窗口 ----------------
+        private const int HudWindowId = 543210;
+        private const float BaseW = 340f;
+        private const float BaseH = 238f;
+        private const float MinW = 220f, MinH = 150f, MaxW = 980f, MaxH = 700f;
+
+        private static Rect _rect = new Rect(-1f, -1f, BaseW, BaseH);
+        private static bool _placed;
+        private static bool _resizing;
+        private static Vector2 _resizeMouse0;
+        private static Vector2 _resizeSize0;
+        private static GUIStyle _hudBg;
+        private static float _saveDelay;
+        private static Rect _lastSavedRect;
+        private static float _hintUntil;
+
+        private static BepInEx.Configuration.ConfigEntry<float> _cfgX, _cfgY, _cfgW, _cfgH;
+
+        /// <summary>控制面板里的"调整计分板位置"：Idle 状态也把 HUD 画出来方便拖动。</summary>
+        internal static bool ForceShow;
+
         private void OnGUI()
         {
             if (Race.Phase == RacePhase.Idle)
             {
                 // 空闲时不画竞速 HUD，但死亡惩罚可能还在（竞速结束后不会）——直接返回
-                return;
+                if (_fx.Count > 0) { _fx.Clear(); _fxSeen.Clear(); }
+                if (!ForceShow) return;
+            }
+
+            // 新一局开始：上一局的结算动画清掉，否则会立刻给"已完赛"的人重播旧成绩
+            if (Race.Phase == RacePhase.WaitingReady || Race.Phase == RacePhase.Countdown)
+            {
+                if (_fx.Count > 0) { _fx.Clear(); _fxSeen.Clear(); }
             }
 
             try
             {
                 EnsureStyles();
+                EnsureLayout();
                 GUI.matrix = Matrix4x4.identity;
                 GUI.color = Color.white;
+                // 比控制面板低一层，避免两个窗口叠在一起时挡住面板操作
+                GUI.depth = 10;
 
-                bool scoreMode = Score.Mode == RaceGameMode.Score;
-                var ranked = Roster.Ranked(scoreMode);
-                int rows = Mathf.Clamp(ranked.Count, 1, 4);
-
-                float w = 330f;
-                float x = Screen.width - w - 10f;
-                float y = 28f;
-                float h = 62f + 36f + rows * 19f + 24f;
-                GUI.Box(new Rect(x, y, w, h), "");
-
-                GUI.Label(new Rect(x + 8, y + 4, w - 16, 22),
-                    "竞速 · " + Score.ModeName(Score.Mode) + " · 终点: " + Race.BossLabel(Race.TargetBossId), _title);
-
-                string timeText;
-                if (Race.Phase == RacePhase.Racing || Race.Phase == RacePhase.Finished)
-                    timeText = Race.FormatTime(Race.Elapsed);
-                else
-                    timeText = "--:--";
-                GUI.Label(new Rect(x + 8, y + 26, w - 16, 34), timeText, _big);
-
-                string status;
-                switch (Race.Phase)
-                {
-                    case RacePhase.WaitingReady:
-                        status = "准备 " + Roster.ReadyCount() + "/" + Roster.Count
-                               + "   你:" + (Race.LocalReady ? "已准备" : "未准备");
-                        break;
-                    case RacePhase.Countdown:
-                        float left = Race.CountdownEndRealtime - Time.realtimeSinceStartup;
-                        status = "倒计时 " + Mathf.CeilToInt(left) + " 秒 · " + Roster.Count + " 人参赛";
-                        break;
-                    case RacePhase.Racing:
-                        status = "完赛 " + Race.FinishedPlayers + "/" + Roster.Count;
-                        if (Race.GraceRemaining >= 0f)
-                            status += "   · 剩余玩家还有 " + Mathf.CeilToInt(Race.GraceRemaining) + " 秒";
-                        break;
-                    case RacePhase.Finished:
-                        status = Race.ResultText;
-                        break;
-                    default:
-                        status = "";
-                        break;
-                }
-                GUI.Label(new Rect(x + 8, y + 62, w - 16, 34), status, _line);
-
-                float ry = y + 98f;
-                for (int i = 0; i < ranked.Count && i < 4; i++)
-                {
-                    var s = ranked[i];
-                    string line = (i + 1) + ". " + s.Display + "   " + SlotLine(s, scoreMode);
-                    GUI.Label(new Rect(x + 8, ry, w - 16, 18), line, s.IsLocal ? _scoreHot : _line);
-                    ry += 19f;
-                }
-
-                GUI.Label(new Rect(x + 8, ry + 2, w - 16, 18),
-                    scoreMode
-                        ? ("规则: " + Score.RuleLine())
-                        : ("加时: 每死 +" + (int)Race.PenaltyPerDeath + " 秒（本次 +"
-                            + Race.FormatTime(Race.LocalPenaltySeconds) + "）"),
-                    _small);
+                // 右下角缩放要在 Window 之前吃掉事件，否则会被 DragWindow 抢走
+                HandleResize();
+                _rect = GUI.Window(HudWindowId, _rect, DrawHudWindow, GUIContent.none, _hudBg);
+                ClampOnScreen();
+                DrawResizeGrip();
+                ScheduleSave();
             }
             catch (Exception ex)
             {
@@ -1498,6 +1499,432 @@ namespace RL2Multiplayer
                 enabled = false;
             }
         }
+
+        /// <summary>窗口默认位置/尺寸（可拖动、可缩放，位置记在 BepInEx 配置里）。</summary>
+        private static void EnsureLayout()
+        {
+            if (_placed) return;
+            _placed = true;
+
+            try
+            {
+                var cfg = Plugin.Instance != null ? Plugin.Instance.Config : null;
+                if (cfg != null)
+                {
+                    _cfgX = cfg.Bind<float>("Hud", "ScoreX", -1f, "竞速计分板左上角 X（-1 表示默认靠右）");
+                    _cfgY = cfg.Bind<float>("Hud", "ScoreY", 28f, "竞速计分板左上角 Y");
+                    _cfgW = cfg.Bind<float>("Hud", "ScoreW", BaseW, "竞速计分板宽度");
+                    _cfgH = cfg.Bind<float>("Hud", "ScoreH", BaseH, "竞速计分板高度");
+                    _rect = new Rect(_cfgX.Value, _cfgY.Value, _cfgW.Value, _cfgH.Value);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [RACE] HUD 配置读取失败: " + ex.Message);
+            }
+
+            if (_rect.width < MinW || _rect.height < MinH)
+                _rect = new Rect(_rect.x, _rect.y, BaseW, BaseH);
+
+            if (_rect.x < -0.5f) _rect.x = Screen.width - _rect.width - 10f;
+            ClampOnScreen();
+            _lastSavedRect = _rect;
+            _hintUntil = Time.unscaledTime + 10f;
+        }
+
+        private static void ClampOnScreen()
+        {
+            _rect.width = Mathf.Clamp(_rect.width, MinW, Mathf.Min(MaxW, Mathf.Max(MinW, Screen.width - 16f)));
+            _rect.height = Mathf.Clamp(_rect.height, MinH, Mathf.Min(MaxH, Mathf.Max(MinH, Screen.height - 16f)));
+            _rect.x = Mathf.Clamp(_rect.x, 0f, Mathf.Max(0f, Screen.width - _rect.width));
+            _rect.y = Mathf.Clamp(_rect.y, 0f, Mathf.Max(0f, Screen.height - _rect.height));
+        }
+
+        private static void HandleResize()
+        {
+            Event e = Event.current;
+            if (e == null) return;
+            Rect grip = new Rect(_rect.xMax - 18f, _rect.yMax - 18f, 18f, 18f);
+
+            switch (e.type)
+            {
+                case EventType.MouseDown:
+                    if (e.button == 0 && grip.Contains(e.mousePosition))
+                    {
+                        _resizing = true;
+                        _resizeMouse0 = e.mousePosition;
+                        _resizeSize0 = new Vector2(_rect.width, _rect.height);
+                        e.Use();
+                    }
+                    break;
+                case EventType.MouseDrag:
+                    if (_resizing)
+                    {
+                        Vector2 d = e.mousePosition - _resizeMouse0;
+                        _rect.width = Mathf.Clamp(_resizeSize0.x + d.x, MinW, MaxW);
+                        _rect.height = Mathf.Clamp(_resizeSize0.y + d.y, MinH, MaxH);
+                        e.Use();
+                    }
+                    break;
+                case EventType.MouseUp:
+                    if (_resizing) { _resizing = false; e.Use(); }
+                    break;
+            }
+        }
+
+        private static void DrawResizeGrip()
+        {
+            EnsureWhite();
+            float x = _rect.xMax - 15f, y = _rect.yMax - 15f;
+            Color prev = GUI.color;
+            GUI.color = new Color(1f, 0.85f, 0.35f, _resizing ? 1f : 0.5f);
+            for (int i = 1; i <= 3; i++)
+            {
+                float len = i * 4f;
+                GUI.DrawTexture(new Rect(x + 12f - len, y + 12f, len, 1.5f), _white);
+                GUI.DrawTexture(new Rect(x + 12f, y + 12f - len, 1.5f, len), _white);
+            }
+            GUI.color = prev;
+        }
+
+        private static void ScheduleSave()
+        {
+            if (_cfgX == null) return;
+            if (_rect == _lastSavedRect) return;
+            _saveDelay += Time.unscaledDeltaTime;
+            if (_saveDelay < 0.6f) return;
+            _saveDelay = 0f;
+            _lastSavedRect = _rect;
+            try
+            {
+                _cfgX.Value = _rect.x;
+                _cfgY.Value = _rect.y;
+                _cfgW.Value = _rect.width;
+                _cfgH.Value = _rect.height;
+            }
+            catch { /* 配置写入失败不影响显示 */ }
+        }
+
+        /// <summary>窗口内容：整体按窗口尺寸等比缩放，布局坐标始终用 BaseW×BaseH。</summary>
+        private static void DrawHudWindow(int id)
+        {
+            float w = _rect.width, h = _rect.height;
+            float s = Mathf.Clamp(Mathf.Min(w / BaseW, h / BaseH), 0.45f, 2f);
+
+            EnsureWhite();
+            Color prev = GUI.color;
+            // 半透明深色底：不挡地图
+            GUI.color = new Color(0.02f, 0.04f, 0.07f, 0.72f);
+            GUI.DrawTexture(new Rect(0f, 0f, w, h), _white);
+            GUI.color = new Color(1f, 0.85f, 0.35f, 0.45f);
+            GUI.DrawTexture(new Rect(0f, 0f, w, 1f), _white);
+            GUI.DrawTexture(new Rect(0f, h - 1f, w, 1f), _white);
+            GUI.DrawTexture(new Rect(0f, 0f, 1f, h), _white);
+            GUI.DrawTexture(new Rect(w - 1f, 0f, 1f, h), _white);
+            GUI.color = prev;
+
+            GUI.BeginGroup(new Rect(0f, 0f, w, h));
+            Matrix4x4 m0 = GUI.matrix;
+            GUIUtility.ScaleAroundPivot(new Vector2(s, s), Vector2.zero);
+            DrawHudContent();
+            GUI.matrix = m0;
+            GUI.EndGroup();
+
+            // 顶部一整条都能拖（窗口不像 GUILayout.Window 那样自带标题栏）
+            GUI.DragWindow(new Rect(0f, 0f, w, Mathf.Max(18f, 24f * s)));
+        }
+
+        private static void DrawHudContent()
+        {
+            float w = BaseW;
+            bool scoreMode = Score.Mode == RaceGameMode.Score;
+            var ranked = Roster.Ranked(scoreMode);
+
+            const float rowH = 26f;
+
+            GUI.Label(new Rect(8f, 3f, w - 16f, 20f),
+                "竞速 · " + Score.ModeName(Score.Mode)
+                + (Race.Phase == RacePhase.Idle ? " · 预览（未开赛）" : " · 终点: " + Race.BossLabel(Race.TargetBossId)),
+                _title);
+
+            string timeText;
+            if (Race.Phase == RacePhase.Racing || Race.Phase == RacePhase.Finished)
+                timeText = Race.FormatTime(Race.Elapsed);
+            else
+                timeText = "--:--";
+            GUI.Label(new Rect(8f, 20f, w - 16f, 34f), timeText, _big);
+
+            string status;
+            switch (Race.Phase)
+            {
+                case RacePhase.WaitingReady:
+                    status = "准备 " + Roster.ReadyCount() + "/" + Roster.Count
+                           + "   你:" + (Race.LocalReady ? "已准备" : "未准备");
+                    break;
+                case RacePhase.Countdown:
+                    float left = Race.CountdownEndRealtime - Time.realtimeSinceStartup;
+                    status = "倒计时 " + Mathf.CeilToInt(left) + " 秒 · " + Roster.Count + " 人参赛";
+                    break;
+                case RacePhase.Racing:
+                    status = "完赛 " + Race.FinishedPlayers + "/" + Roster.Count;
+                    if (Race.GraceRemaining >= 0f)
+                        status += "   · 剩余玩家还有 " + Mathf.CeilToInt(Race.GraceRemaining) + " 秒";
+                    break;
+                case RacePhase.Finished:
+                    status = Race.ResultText;
+                    break;
+                default:
+                    status = "";
+                    break;
+            }
+            GUI.Label(new Rect(8f, 54f, w - 16f, 34f), status, _line);
+
+            float ry = 92f;
+            for (int i = 0; i < ranked.Count && i < 4; i++)
+            {
+                var s = ranked[i];
+                Rect row = new Rect(6f, ry, w - 12f, rowH);
+                DrawAvatar(row, s);
+
+                string line = (i + 1) + ". " + s.Display + "   " + SlotLine(s, scoreMode);
+                GUI.Label(new Rect(row.x + 28f, ry - 2f, w - 46f, 18f), line, s.IsLocal ? _scoreHot : _line);
+                ry += rowH;
+            }
+
+            // 完赛动画要在所有行之后画，才能盖在列表上面
+            for (int i = 0; i < ranked.Count && i < 4; i++)
+            {
+                var s = ranked[i];
+                if (!s.Finished || s.Dnf) continue;
+                EnsureTallyFx(s);
+                DrawTallyFx(new Rect(6f, 92f + i * rowH, w - 12f, rowH), s);
+            }
+
+            GUI.Label(new Rect(8f, ry + 2f, w - 16f, 18f),
+                scoreMode
+                    ? ("规则: " + Score.RuleLine())
+                    : ("加时: 每死 +" + (int)Race.PenaltyPerDeath + " 秒（本次 +"
+                        + Race.FormatTime(Race.LocalPenaltySeconds) + "）"),
+                _small);
+
+            if (Time.unscaledTime < _hintUntil)
+            {
+                Color prev = GUI.color;
+                GUI.color = new Color(1f, 0.85f, 0.35f, 0.85f);
+                GUI.Label(new Rect(8f, BaseH - 20f, w - 16f, 16f),
+                    "拖动标题移动 · 右下角拖动缩放（位置会记住）", _small);
+                GUI.color = prev;
+            }
+        }
+
+        // ---------------- 头像 + 完赛统计动画（v1.7.2） ----------------
+
+        private static Texture2D _white;
+        private static GUIStyle _avatar;
+        private static GUIStyle _tallyLine;
+        private static GUIStyle _tallyTotal;
+
+        private class TallyFx
+        {
+            public int Id;
+            public float Start;
+            public string[] Labels;
+            public int[] Values;
+            public int Total;
+        }
+
+        private static readonly Dictionary<int, TallyFx> _fx = new Dictionary<int, TallyFx>();
+        private static readonly HashSet<int> _fxSeen = new HashSet<int>();
+
+        private static void EnsureWhite()
+        {
+            if (_white != null) return;
+            _white = new Texture2D(1, 1, TextureFormat.RGBA32, false);
+            _white.SetPixel(0, 0, Color.white);
+            _white.Apply();
+            _white.hideFlags = HideFlags.HideAndDontSave;
+        }
+
+        private static Color AvatarColor(int id)
+        {
+            switch (id)
+            {
+                case 0: return new Color(1f, 0.78f, 0.28f);      // 主机：金
+                case 1: return new Color(0.40f, 0.76f, 1f);      // P2：蓝
+                case 2: return new Color(0.55f, 0.95f, 0.55f);   // P3：绿
+                default: return new Color(1f, 0.55f, 0.78f);     // P4：粉
+            }
+        }
+
+        /// <summary>玩家图像（头像方块）：完赛后描金边。</summary>
+        private static void DrawAvatar(Rect row, PlayerSlot s)
+        {
+            EnsureWhite();
+            Rect av = new Rect(row.x + 3f, row.y + 2f, 22f, 22f);
+            Color c = AvatarColor(s.Id);
+            bool done = s.Finished && !s.Dnf;
+
+            Color prev = GUI.color;
+            GUI.color = new Color(c.r * 0.45f, c.g * 0.45f, c.b * 0.45f, 0.95f);
+            GUI.DrawTexture(av, _white);
+
+            GUI.color = done ? new Color(1f, 0.88f, 0.35f) : new Color(c.r * 0.85f, c.g * 0.85f, c.b * 0.85f, 0.9f);
+            GUI.DrawTexture(new Rect(av.x, av.y, av.width, 2f), _white);
+            GUI.DrawTexture(new Rect(av.x, av.yMax - 2f, av.width, 2f), _white);
+            GUI.DrawTexture(new Rect(av.x, av.y, 2f, av.height), _white);
+            GUI.DrawTexture(new Rect(av.xMax - 2f, av.y, 2f, av.height), _white);
+            GUI.color = prev;
+
+            GUI.Label(new Rect(av.x, av.y + 3f, av.width, 16f), s.IsLocal ? "你" : s.Tag, _avatar);
+        }
+
+        private static string FormatGold(int gold)
+        {
+            if (gold >= 1000000) return (gold / 1000000f).ToString("F1") + "M";
+            if (gold >= 10000) return (gold / 1000f).ToString("F1") + "k";
+            return gold.ToString();
+        }
+
+        private static string Signed(int v)
+        {
+            return v >= 0 ? ("+" + v) : v.ToString();
+        }
+
+        /// <summary>第一次看到某人完成时，给他建一份结算动画面板数据。</summary>
+        private static void EnsureTallyFx(PlayerSlot s)
+        {
+            if (!_fxSeen.Add(s.Id)) return;
+
+            // 本地玩家直接用本地累加器（网络包 0.5s 一次，刚完赛时明细可能还没刷到槽位里）
+            int rooms = s.IsLocal ? Score.LocalRooms : s.Rooms;
+            int kills = s.IsLocal ? Score.LocalKills : s.Kills;
+            int bosses = s.IsLocal ? Score.LocalBosses : s.Bosses;
+            int chests = s.IsLocal ? Score.LocalChests : s.Chests;
+            int chestPts = s.IsLocal ? Score.LocalChestPoints : s.ChestPoints;
+            int relics = s.IsLocal ? Score.LocalRelics : s.Relics;
+            int deaths = s.IsLocal ? Score.LocalDeaths : s.Deaths;
+            int coinPts = s.IsLocal ? Score.LocalCoinPoints : s.CoinPoints;
+            int gold = s.IsLocal ? Score.LocalGoldConverted : s.GoldCollected;
+
+            var labels = new List<string>();
+            var values = new List<int>();
+
+            if (rooms > 0) { labels.Add("探索房间 ×" + rooms); values.Add(rooms * Score.RoomPoints); }
+            if (kills > 0) { labels.Add("击杀怪物 ×" + kills); values.Add(kills * Score.EnemyPoints); }
+            if (bosses > 0) { labels.Add("击败 Boss ×" + bosses); values.Add(bosses * Score.BossPoints); }
+            if (chests > 0) { labels.Add("开箱 ×" + chests); values.Add(chestPts); }
+            if (coinPts != 0 || gold > 0)
+            {
+                labels.Add("金币 " + FormatGold(gold));
+                values.Add(coinPts);
+            }
+            if (relics > 0) { labels.Add("遗物 ×" + relics); values.Add(-(relics * Score.RelicPenalty)); }
+            if (deaths > 0) { labels.Add("死亡 ×" + deaths); values.Add(-(deaths * Score.DeathPenalty)); }
+
+            int sum = 0;
+            for (int i = 0; i < values.Count; i++) sum += values[i];
+            int rest = s.Score - sum;
+            if (rest != 0) { labels.Add("时间衰减 / 其他"); values.Add(rest); }
+
+            if (labels.Count == 0) { labels.Add("完赛"); values.Add(s.Score); }
+
+            var fx = new TallyFx();
+            fx.Id = s.Id;
+            fx.Start = Time.unscaledTime;
+            fx.Labels = labels.ToArray();
+            fx.Values = values.ToArray();
+            fx.Total = s.Score;
+            _fx[s.Id] = fx;
+
+            Plugin.Log.LogInfo("[RL2MP] [RACE] 结算动画: " + s.Tag + " 总分 " + s.Score
+                + " | " + string.Join(", ", labels.ToArray()));
+        }
+
+        /// <summary>
+        /// 画结算面板：从该玩家头像位置滑到"图像正前方"（列表左侧），
+        /// 然后逐行滚出加成项，总分跟着跳动。
+        /// </summary>
+        private static void DrawTallyFx(Rect row, PlayerSlot s)
+        {
+            TallyFx fx;
+            if (!_fx.TryGetValue(s.Id, out fx)) return;
+
+            float age = Time.unscaledTime - fx.Start;
+            int n = fx.Labels.Length;
+            const float revealStart = 0.30f;
+            const float perLine = 0.20f;
+            const float hold = 4.5f;
+            float allShown = revealStart + n * perLine;
+            float life = allShown + hold;
+
+            float fade = age > life ? Mathf.Clamp01(1f - (age - life) / 0.7f) : 1f;
+            if (fade <= 0f) return;
+
+            float inT = Mathf.Clamp01(age / 0.30f);
+            float ease = 1f - (1f - inT) * (1f - inT);
+
+            float panelW = Mathf.Min(248f, BaseW - 12f);
+            float panelH = 26f + (n + 1) * 16f + 8f;
+            // v1.7.3：面板改在窗口内部滑动。窗口用 BeginGroup 裁剪，
+            // 画到窗口外的部分会被切掉，所以终点固定在窗口左内侧。
+            float finalX = 6f;
+            float startX = row.xMax - 40f;        // 从该玩家的分数位置飞出来
+            float px = Mathf.Lerp(startX, finalX, ease);
+            float py = Mathf.Clamp(row.y + row.height * 0.5f - panelH * 0.5f,
+                2f, Mathf.Max(2f, BaseH - panelH - 2f));
+
+            Color prev = GUI.color;
+            GUI.color = new Color(1f, 1f, 1f, fade);
+            EnsureWhite();
+            Color bg = GUI.color;
+            GUI.color = new Color(0.02f, 0.04f, 0.07f, 0.94f * fade);
+            GUI.DrawTexture(new Rect(px, py, panelW, panelH), _white);
+            GUI.color = new Color(1f, 0.86f, 0.32f, 0.7f * fade);
+            GUI.DrawTexture(new Rect(px, py, panelW, 1.5f), _white);
+            GUI.DrawTexture(new Rect(px, py + panelH - 1.5f, panelW, 1.5f), _white);
+            GUI.DrawTexture(new Rect(px, py, 1.5f, panelH), _white);
+            GUI.DrawTexture(new Rect(px + panelW - 1.5f, py, 1.5f, panelH), _white);
+            GUI.color = bg;
+
+            GUI.Label(new Rect(px + 8f, py + 3f, panelW - 16f, 16f),
+                s.Display + " 完赛 · " + Race.FormatTime(s.FinishTime), _tallyLine);
+
+            int shown = 0;
+            int revealed = 0;
+            for (int i = 0; i < n; i++)
+            {
+                float t = (age - revealStart - i * perLine) / 0.14f;
+                if (t <= 0f) break;
+                float a = Mathf.Clamp01(t);
+                revealed++;
+
+                Color lc = fx.Values[i] >= 0
+                    ? new Color(0.75f, 1f, 0.78f, a * fade)
+                    : new Color(1f, 0.66f, 0.60f, a * fade);
+                GUI.color = lc;
+                GUI.Label(new Rect(px + 10f, py + 22f + i * 16f, panelW - 20f, 15f),
+                    fx.Labels[i], _tallyLine);
+                GUI.Label(new Rect(px + panelW - 78f, py + 22f + i * 16f, 68f, 15f),
+                    Signed(fx.Values[i]) + " 分", _tallyTotalRight);
+
+                shown += fx.Values[i];
+            }
+
+            int live = shown;
+            if (revealed >= n)
+            {
+                float tt = Mathf.Clamp01((age - allShown) / 0.35f);
+                live = Mathf.RoundToInt(Mathf.Lerp(shown, fx.Total, tt));
+            }
+
+            GUI.color = new Color(1f, 0.86f, 0.32f, fade);
+            GUI.Label(new Rect(px + 8f, py + panelH - 24f, 90f, 20f), "总分", _tallyTotal);
+            GUI.Label(new Rect(px + 52f, py + panelH - 26f, panelW - 60f, 22f),
+                live + " 分", _tallyTotal);
+            GUI.color = prev;
+        }
+
+        private static GUIStyle _tallyTotalRight;
 
         private static string SlotLine(PlayerSlot s, bool scoreMode)
         {
@@ -1513,6 +1940,18 @@ namespace RL2Multiplayer
 
         private static void EnsureStyles()
         {
+            if (_hudBg == null)
+            {
+                // 空样式：窗口背景由我们自己画（半透明，不挡地图）
+                _hudBg = new GUIStyle(GUI.skin.box);
+                _hudBg.normal.background = null;
+                _hudBg.hover.background = null;
+                _hudBg.active.background = null;
+                _hudBg.focused.background = null;
+                _hudBg.border = new RectOffset(0, 0, 0, 0);
+                _hudBg.padding = new RectOffset(0, 0, 0, 0);
+                _hudBg.margin = new RectOffset(0, 0, 0, 0);
+            }
             if (_title == null)
             {
                 _title = new GUIStyle(GUI.skin.label);
@@ -1555,6 +1994,34 @@ namespace RL2Multiplayer
                 _center.fontStyle = FontStyle.Bold;
                 _center.normal.textColor = new Color(1f, 0.5f, 0.4f);
                 _center.alignment = TextAnchor.MiddleCenter;
+            }
+            if (_avatar == null)
+            {
+                _avatar = new GUIStyle(GUI.skin.label);
+                _avatar.fontSize = 11;
+                _avatar.fontStyle = FontStyle.Bold;
+                _avatar.alignment = TextAnchor.MiddleCenter;
+                _avatar.normal.textColor = new Color(0.05f, 0.05f, 0.05f);
+            }
+            if (_tallyLine == null)
+            {
+                _tallyLine = new GUIStyle(GUI.skin.label);
+                _tallyLine.fontSize = 11;
+                _tallyLine.normal.textColor = Color.white;
+            }
+            if (_tallyTotalRight == null)
+            {
+                _tallyTotalRight = new GUIStyle(GUI.skin.label);
+                _tallyTotalRight.fontSize = 11;
+                _tallyTotalRight.alignment = TextAnchor.MiddleRight;
+                _tallyTotalRight.normal.textColor = Color.white;
+            }
+            if (_tallyTotal == null)
+            {
+                _tallyTotal = new GUIStyle(GUI.skin.label);
+                _tallyTotal.fontSize = 15;
+                _tallyTotal.fontStyle = FontStyle.Bold;
+                _tallyTotal.normal.textColor = new Color(1f, 0.86f, 0.32f);
             }
         }
     }
