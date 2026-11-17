@@ -1,0 +1,27 @@
+public enum ChallengeType
+{
+	None = 0,
+	Tutorial = 10,
+	TutorialPurified = 12,
+	DashCancel = 20,
+	IntroCombat = 30,
+	PlatformAxe = 40,
+	TwinMech = 110,
+	ThreeSkeletons = 120,
+	BrotherAndSister = 130,
+	SmallChest = 140,
+	TwoLovers = 150,
+	NightmareKhidr = 160,
+	BigBattle = 170,
+	SubBossBattle = 180,
+	FourHands = 190,
+	TwoRebels = 195,
+	PlatformRanger = 210,
+	PlatformBoat = 220,
+	PlatformKatana = 230,
+	PlatformClimb = 240,
+	SwordKnightMiniboss = 250,
+	Arena01 = 310,
+	BossRush = 410,
+	BossRushRemix = 420
+}

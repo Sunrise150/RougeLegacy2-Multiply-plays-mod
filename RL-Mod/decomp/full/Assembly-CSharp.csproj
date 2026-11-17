@@ -1,0 +1,98 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <AssemblyName>Assembly-CSharp</AssemblyName>
+    <GenerateAssemblyInfo>False</GenerateAssemblyInfo>
+    <TargetFramework>net40</TargetFramework>
+  </PropertyGroup>
+  <PropertyGroup>
+    <LangVersion>11.0</LangVersion>
+    <AllowUnsafeBlocks>True</AllowUnsafeBlocks>
+  </PropertyGroup>
+  <PropertyGroup />
+  <ItemGroup />
+  <ItemGroup>
+    <Reference Include="Cinemachine">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Cinemachine.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.Physics2DModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Unity.TextMeshPro">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Unity.TextMeshPro.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.AnimationModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AudioModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.AudioModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.UI.dll</HintPath>
+    </Reference>
+    <Reference Include="FMODUnity">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\FMODUnity.dll</HintPath>
+    </Reference>
+    <Reference Include="CorgiEngine_Assembled">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\CorgiEngine_Assembled.dll</HintPath>
+    </Reference>
+    <Reference Include="Rewired_Core">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Rewired_Core.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.ParticleSystemModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UIModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.UIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Ferr_Assembled">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Ferr_Assembled.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.PhysicsModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.PhysicsModule.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Core" />
+    <Reference Include="UnityEngine.VideoModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.VideoModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UnityWebRequestModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.UnityWebRequestModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.DirectorModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.DirectorModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Assembly-CSharp-firstpass">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Assembly-CSharp-firstpass.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AssetBundleModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.AssetBundleModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.IMGUIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="System.Xml" />
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.TextRenderingModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.InputLegacyModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.JSONSerializeModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.JSONSerializeModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.ImageConversionModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.ImageConversionModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.ScreenCaptureModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.ScreenCaptureModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UnityAnalyticsModule">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\UnityEngine.UnityAnalyticsModule.dll</HintPath>
+    </Reference>
+    <Reference Include="Rewired_Windows">
+      <HintPath>..\..\..\Rogue.Legacy.2\Rogue Legacy 2\Rogue Legacy 2_Data\Managed\Rewired_Windows.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+</Project>

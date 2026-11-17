@@ -1,0 +1,218 @@
+{
+  "Version": 1,
+  "WorkspaceRootPath": "D:\\RL-Mod\\RL-Mod\\",
+  "Documents": [
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\racemode.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:racemode.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\mapsync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:mapsync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\downed.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:downed.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\charactersync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:charactersync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|d:\\rl-mod\\rl-mod\\networkmanager.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:networkmanager.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\controlpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:controlpanel.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\seedsync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:seedsync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\score.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:score.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\plugin.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:plugin.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\playersync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:playersync.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|D:\\RL-Mod\\RL-Mod\\properties\\assemblyinfo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{08FC2021-F9D8-476E-B0FB-817D6D054ADA}|RL-Mod.csproj|solutionrelative:properties\\assemblyinfo.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    },
+    {
+      "AbsoluteMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|d:\\rl-mod\\rl-mod\\rl-mod.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}",
+      "RelativeMoniker": "D:0:0:{A2FE74E1-B743-11D0-AE1A-00A0C90FFFC3}|\u003CMiscFiles\u003E|solutionrelative:rl-mod.cs||{A6C744A8-0E4A-4FC6-886A-064283054674}"
+    }
+  ],
+  "DocumentGroupContainers": [
+    {
+      "Orientation": 0,
+      "VerticalTabListWidth": 256,
+      "DocumentGroups": [
+        {
+          "DockedWidth": 200,
+          "SelectedChildIndex": 5,
+          "Children": [
+            {
+              "$type": "Document",
+              "DocumentIndex": 3,
+              "Title": "CharacterSync.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\CharacterSync.cs",
+              "RelativeDocumentMoniker": "CharacterSync.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\CharacterSync.cs",
+              "RelativeToolTip": "CharacterSync.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAcAAAAYAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-17T05:01:58.574Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 6,
+              "Title": "SeedSync.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\SeedSync.cs",
+              "RelativeDocumentMoniker": "SeedSync.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\SeedSync.cs",
+              "RelativeToolTip": "SeedSync.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-17T05:01:40.14Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 1,
+              "Title": "MapSync.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\MapSync.cs",
+              "RelativeDocumentMoniker": "MapSync.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\MapSync.cs",
+              "RelativeToolTip": "MapSync.cs",
+              "ViewState": "AQIAAGwBAAAAAAAAAAAAAHgBAAAsAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-17T05:01:25.125Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 2,
+              "Title": "Downed.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\Downed.cs",
+              "RelativeDocumentMoniker": "Downed.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\Downed.cs",
+              "RelativeToolTip": "Downed.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-16T07:43:10.372Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 5,
+              "Title": "ControlPanel.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\ControlPanel.cs",
+              "RelativeDocumentMoniker": "ControlPanel.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\ControlPanel.cs",
+              "RelativeToolTip": "ControlPanel.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-16T07:43:03.923Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 0,
+              "Title": "RaceMode.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\RaceMode.cs",
+              "RelativeDocumentMoniker": "RaceMode.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\RaceMode.cs",
+              "RelativeToolTip": "RaceMode.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAcAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-16T09:55:29.895Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 4,
+              "Title": "NetworkManager.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\NetworkManager.cs",
+              "RelativeDocumentMoniker": "NetworkManager.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\NetworkManager.cs",
+              "RelativeToolTip": "NetworkManager.cs",
+              "ViewState": "AQIAAA4BAAAAAAAAAAAAAAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-15T07:13:06.345Z",
+              "EditorCaption": ""
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 7,
+              "Title": "Score.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\Score.cs",
+              "RelativeDocumentMoniker": "Score.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\Score.cs",
+              "RelativeToolTip": "Score.cs",
+              "ViewState": "AQIAABEAAAAAAAAAAAAAwAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-17T05:01:35.6Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 9,
+              "Title": "PlayerSync.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\PlayerSync.cs",
+              "RelativeDocumentMoniker": "PlayerSync.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\PlayerSync.cs",
+              "RelativeToolTip": "PlayerSync.cs",
+              "ViewState": "AQIAAFwCAAAAAAAAAAAAAAgAAAASAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-15T07:13:05.748Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 10,
+              "Title": "AssemblyInfo.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\Properties\\AssemblyInfo.cs",
+              "RelativeDocumentMoniker": "Properties\\AssemblyInfo.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\Properties\\AssemblyInfo.cs",
+              "RelativeToolTip": "Properties\\AssemblyInfo.cs",
+              "ViewState": "AQIAABsAAAAAAAAAAAAAAAAAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-16T09:55:25.289Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 8,
+              "Title": "Plugin.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\Plugin.cs",
+              "RelativeDocumentMoniker": "Plugin.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\Plugin.cs",
+              "RelativeToolTip": "Plugin.cs",
+              "ViewState": "AQIAAPEAAAAAAAAAAAAAAA8AAAAmAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-15T07:13:03.484Z"
+            },
+            {
+              "$type": "Document",
+              "DocumentIndex": 11,
+              "Title": "RL-Mod.cs",
+              "DocumentMoniker": "D:\\RL-Mod\\RL-Mod\\RL-Mod.cs",
+              "RelativeDocumentMoniker": "RL-Mod.cs",
+              "ToolTip": "D:\\RL-Mod\\RL-Mod\\RL-Mod.cs",
+              "RelativeToolTip": "RL-Mod.cs",
+              "ViewState": "AQIAAAAAAAAAAAAAAAAAAAwAAAAAAAAA",
+              "Icon": "ae27a6b0-e345-4288-96df-5eaf394ee369.000738|",
+              "WhenOpened": "2026-11-15T07:00:22.321Z"
+            }
+          ]
+        }
+      ]
+    }
+  ]
+}

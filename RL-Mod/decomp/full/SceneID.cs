@@ -1,0 +1,27 @@
+public enum SceneID
+{
+	None,
+	Splash,
+	MainMenu,
+	Options,
+	Game,
+	World,
+	Loading,
+	Transition,
+	Pause,
+	Blacksmith,
+	Town,
+	SkillTree,
+	HUD,
+	Dialogue,
+	ProfileSelect,
+	BackupSaveSelect,
+	Map,
+	Lineage,
+	LevelEditor,
+	Disclaimer,
+	Tutorial,
+	Parade,
+	Credits,
+	Testing
+}

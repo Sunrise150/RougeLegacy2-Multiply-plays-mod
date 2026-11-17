@@ -1,0 +1,26 @@
+public enum ClassType
+{
+	None = 0,
+	SwordClass = 10,
+	AxeClass = 20,
+	MagicWandClass = 30,
+	DualBladesClass = 40,
+	SiphonClass = 50,
+	CaneClass = 60,
+	SpearClass = 70,
+	KunaiClass = 80,
+	BowClass = 90,
+	ChakramClass = 100,
+	PolymorphClass = 110,
+	TonfaClass = 120,
+	SaberClass = 130,
+	LadleClass = 140,
+	BoxingGloveClass = 150,
+	LanceClass = 160,
+	GunClass = 170,
+	KatanaClass = 180,
+	CannonClass = 190,
+	LuteClass = 200,
+	AstroClass = 210,
+	CURIO_SHOPPE_CLASS = 1000
+}

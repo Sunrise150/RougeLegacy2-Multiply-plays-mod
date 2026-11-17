@@ -1,0 +1,27 @@
+public enum GamepadInputType
+{
+	None,
+	LeftStickHorizontal,
+	LeftStickVertical,
+	RightStickHorizontal,
+	RightStickVertical,
+	LeftShoulderAnalog,
+	RightShoulderAnalog,
+	A,
+	B,
+	X,
+	Y,
+	LeftShoulderDigital,
+	RightShoulderDigital,
+	Back,
+	Start,
+	LeftStickIn,
+	RightStickIn,
+	DPadUp,
+	DPadRight,
+	DPadDown,
+	DPadLeft,
+	LeftStickAny,
+	RightStickAny,
+	CenterButton
+}

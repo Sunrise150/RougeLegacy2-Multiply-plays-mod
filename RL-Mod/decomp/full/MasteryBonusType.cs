@@ -1,0 +1,22 @@
+public enum MasteryBonusType
+{
+	None,
+	Health_Up,
+	Strength_Up,
+	Magic_Up,
+	EquipmentWeight_Up,
+	RuneWeight_Up,
+	Dexterity_Add,
+	Focus_Add,
+	Armor_Add_Up,
+	Health_Up_Mod,
+	Strength_Up_Mod,
+	Magic_Up_Mod,
+	Dexterity_Mod,
+	Focus_Mod,
+	Armor_Add_Up_Mod,
+	WeaponCritDamage_Up,
+	MagicCritDamage_Up,
+	SpinKickDamage_Up,
+	Ore_And_Aether_Up
+}
