@@ -638,7 +638,8 @@ namespace RL2Multiplayer
             Phase = RacePhase.Finished;
             ResultText = BuildResultText(ranked, scoreMode);
 
-            Plugin.Log.LogInfo("[RL2MP] [RACE] HOST 结算（" + Score.ModeName(Score.Mode) + "）："
+            Plugin.Log.LogInfo("[RL2MP] [RACE] HOST 结算（玩法=" + Score.StyleName(Score.Style)
+                + " 判定=" + Score.ModeName(Score.Mode) + "）："
                 + DescribeRanking(ranked));
             nm.SendRaceResult(ranked[0].Id, scoreMode, ranked);
         }
@@ -1637,14 +1638,12 @@ namespace RL2Multiplayer
         private static void DrawHudContent()
         {
             float w = BaseW;
-            bool scoreMode = Score.Mode == RaceGameMode.Score;
-            var ranked = Roster.Ranked(scoreMode);
-
-            const float rowH = 26f;
+            bool coop = Score.Style == PlayStyle.CoOp;
 
             GUI.Label(new Rect(8f, 3f, w - 16f, 20f),
-                "竞速 · " + Score.ModeName(Score.Mode)
-                + (Race.Phase == RacePhase.Idle ? " · 预览（未开赛）" : " · 终点: " + Race.BossLabel(Race.TargetBossId)),
+                coop ? "双人协作 · 存活时间"
+                     : (Score.StyleName(Score.Style) + " · " + Score.ModeName(Score.Mode)
+                        + (Race.Phase == RacePhase.Idle ? " · 预览（未开赛）" : " · 终点: " + Race.BossLabel(Race.TargetBossId))),
                 _title);
 
             string timeText;
@@ -1652,6 +1651,27 @@ namespace RL2Multiplayer
                 timeText = Race.FormatTime(Race.Elapsed);
             else
                 timeText = "--:--";
+
+            // 协作模式：不比用时/得分、不排名，右上角只留计时器 + 救援状态
+            if (coop)
+            {
+                GUI.Label(new Rect(8f, 22f, w - 16f, 58f), timeText, _big);
+                DrawCoOpStatus(w);
+                if (Time.unscaledTime < _hintUntil)
+                {
+                    Color prev = GUI.color;
+                    GUI.color = new Color(1f, 0.85f, 0.35f, 0.85f);
+                    GUI.Label(new Rect(8f, BaseH - 20f, w - 16f, 16f),
+                        "拖动标题移动 · 右下角拖动缩放（位置会记住）", _small);
+                    GUI.color = prev;
+                }
+                return;
+            }
+
+            bool scoreMode = Score.Mode == RaceGameMode.Score;
+            var ranked = Roster.Ranked(scoreMode);
+            const float rowH = 26f;
+
             GUI.Label(new Rect(8f, 20f, w - 16f, 34f), timeText, _big);
 
             string status;
@@ -1715,6 +1735,50 @@ namespace RL2Multiplayer
                     "拖动标题移动 · 右下角拖动缩放（位置会记住）", _small);
                 GUI.color = prev;
             }
+        }
+
+        /// <summary>协作 HUD 状态行：倒地待救 / 自救倒计时 / 救人进度 / 血上限惩罚。</summary>
+        private static void DrawCoOpStatus(float w)
+        {
+            Color prev = GUI.color;
+            float y = 84f;
+            float lineH = 22f;
+
+            // 血上限惩罚（任何协作对局中若已累积就常驻显示）
+            float penalty = CoOpRescue.PenaltyRatio;
+            if (penalty > 0f)
+            {
+                GUI.color = new Color(1f, 0.55f, 0.5f, 0.9f);
+                GUI.Label(new Rect(8f, y, w - 16f, lineH),
+                    "血上限 -" + (penalty * 100f).ToString("F0") + "%（被队友救起可恢复）", _small);
+                y += lineH;
+            }
+
+            if (CoOpRescue.LocalDown)
+            {
+                GUI.color = new Color(1f, 0.5f, 0.45f, 0.95f);
+                GUI.Label(new Rect(8f, y, w - 16f, lineH), "你已倒地 · 等待队友靠近长按 H 救援", _line);
+                y += lineH;
+                string sub = CoOpRescue.SafeCondition
+                    ? "房间安全 · 无人救则 " + Mathf.CeilToInt(Mathf.Max(0f, CoOpRescue.SelfRescueRemaining)) + " 秒后自行爬起"
+                    : "房间有怪/队友不在 · 自救暂停（队友仍可强行救援）";
+                GUI.Label(new Rect(8f, y, w - 16f, lineH), sub, _small);
+            }
+            else if (CoOpRescue.RescueTargetId >= 0)
+            {
+                GUI.color = new Color(0.5f, 1f, 0.65f, 0.95f);
+                int pct = Mathf.Clamp(Mathf.RoundToInt(CoOpRescue.RescueProgress * 100f), 0, 100);
+                GUI.Label(new Rect(8f, y, w - 16f, lineH),
+                    "长按 H 救援队友… " + pct + "%", _line);
+            }
+            else
+            {
+                GUI.color = new Color(0.75f, 0.9f, 1f, 0.85f);
+                GUI.Label(new Rect(8f, y, w - 16f, lineH),
+                    "靠近倒地队友 · 长按 H 救起", _small);
+            }
+
+            GUI.color = prev;
         }
 
         // ---------------- 头像 + 完赛统计动画（v1.7.2） ----------------

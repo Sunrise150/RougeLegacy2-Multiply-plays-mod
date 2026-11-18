@@ -14,6 +14,17 @@ namespace RL2Multiplayer
     }
 
     /// <summary>
+    /// 玩法维度（v1.7.6）：竞速 = 各跑各的、先到终点者胜；
+    /// 协作 = 两人同图、一起过门、倒地救援（玩法行为将在后续版本逐步启用）。
+    /// 与判定方式正交：两种玩法都能选比用时 / 比得分。
+    /// </summary>
+    public enum PlayStyle
+    {
+        Race = 0,
+        CoOp = 1,
+    }
+
+    /// <summary>
     /// 得分系统：给竞速加一层"行为计分"，避免"用命换时间"的莽夫打法。
     ///
     /// 计分项（全部主机可调，实时广播给客机）：
@@ -31,6 +42,10 @@ namespace RL2Multiplayer
     internal static class Score
     {
         // ---------------- 规则配置（主机权威） ----------------
+
+        // 玩法（主机权威，与判定方式正交）。v1.7.6 先只做切换/同步/显示，
+        // 协作的行为规则在后续版本按 Score.Style == PlayStyle.CoOp 分支逐步启用。
+        public static PlayStyle Style = PlayStyle.Race;
 
         public static RaceGameMode Mode = RaceGameMode.Time;
 
@@ -128,7 +143,8 @@ namespace RL2Multiplayer
             _sendTimer = 0f;
             _dirty = false;
 
-            Plugin.Log.LogInfo("[RL2MP] [SCORE] 积分已清零（模式=" + ModeName(Mode)
+            Plugin.Log.LogInfo("[RL2MP] [SCORE] 积分已清零（玩法=" + StyleName(Style)
+                + " 判定=" + ModeName(Mode)
                 + " 房间+" + RoomPoints + " 怪+" + EnemyPoints + " Boss+" + BossPoints
                 + " 箱子+" + ChestBronzePoints + "/" + ChestSilverPoints + "/" + ChestGoldPoints
                 + "/" + ChestFairyPoints
@@ -422,9 +438,10 @@ namespace RL2Multiplayer
             if (nm.Connected)
                 nm.SendScoreConfig(Mode, RoomPoints, EnemyPoints, BossPoints, RelicPenalty, DeathPenalty,
                     DecayPerMinute, ChestBronzePoints, ChestSilverPoints, ChestGoldPoints, ChestFairyPoints,
-                    GoldPerPoint, GoldNgPlusStep);
+                    GoldPerPoint, GoldNgPlusStep, Style);
 
-            Plugin.Log.LogInfo("[RL2MP] [SCORE] HOST 规则广播 -> 模式=" + ModeName(Mode)
+            Plugin.Log.LogInfo("[RL2MP] [SCORE] HOST 规则广播 -> 玩法=" + StyleName(Style)
+                + " 判定=" + ModeName(Mode)
                 + " 房间+" + RoomPoints + " 怪+" + EnemyPoints + " Boss+" + BossPoints
                 + " 箱子+" + ChestBronzePoints + "/" + ChestSilverPoints + "/" + ChestGoldPoints + "/" + ChestFairyPoints
                 + " 金币 " + GoldPerPoint + "(" + CurrentNgPlus() + "周目 -> " + EffectiveGoldPerPoint() + ")=1分"
@@ -433,9 +450,11 @@ namespace RL2Multiplayer
         }
 
         internal static void ApplyConfig(RaceGameMode mode, int room, int enemy, int boss, int relic, int death, int decay,
-            int chestBronze, int chestSilver, int chestGold, int chestFairy, int goldPerPoint, float goldNgPlusStep)
+            int chestBronze, int chestSilver, int chestGold, int chestFairy, int goldPerPoint, float goldNgPlusStep,
+            PlayStyle style = PlayStyle.Race)
         {
             Mode = mode;
+            Style = style;
             RoomPoints = Mathf.Clamp(room, 0, MaxPoints);
             EnemyPoints = Mathf.Clamp(enemy, 0, MaxPoints);
             BossPoints = Mathf.Clamp(boss, 0, MaxPoints);
@@ -449,7 +468,8 @@ namespace RL2Multiplayer
             GoldPerPoint = Mathf.Clamp(goldPerPoint, 100, 10000000);
             GoldNgPlusStep = Mathf.Clamp(goldNgPlusStep, 0f, 5f);
 
-            Plugin.Log.LogInfo("[RL2MP] [SCORE] 收到规则: 模式=" + ModeName(Mode)
+            Plugin.Log.LogInfo("[RL2MP] [SCORE] 收到规则: 玩法=" + StyleName(Style)
+                + " 判定=" + ModeName(Mode)
                 + " 房间+" + RoomPoints + " 怪+" + EnemyPoints + " Boss+" + BossPoints
                 + " 箱子+" + ChestBronzePoints + "/" + ChestSilverPoints + "/" + ChestGoldPoints + "/" + ChestFairyPoints
                 + " 金币 " + GoldPerPoint + "=1分(周目递增 " + (GoldNgPlusStep * 100f).ToString("F0") + "%)"
@@ -459,6 +479,7 @@ namespace RL2Multiplayer
 
         internal static void ResetDefaults()
         {
+            Style = PlayStyle.Race;
             Mode = RaceGameMode.Time;
             RoomPoints = 25;
             EnemyPoints = 3;
@@ -478,6 +499,11 @@ namespace RL2Multiplayer
         public static string ModeName(RaceGameMode m)
         {
             return m == RaceGameMode.Score ? "比得分" : "比用时";
+        }
+
+        public static string StyleName(PlayStyle s)
+        {
+            return s == PlayStyle.CoOp ? "双人协作" : "竞速";
         }
 
         // =====================================================================

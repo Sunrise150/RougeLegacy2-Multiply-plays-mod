@@ -41,6 +41,10 @@ namespace RL2Multiplayer
         PlayerAnim = 29,        // 双向：动画状态（10Hz，Sequenced）
         PlayerFlags = 30,       // 双向：状态位 downed（变化时才发，Reliable）
         Projectile = 31,        // 双向：弹体发射事件（终态快照，ReliableUnordered）
+        CoOpRescue = 32,        // 双向：协作救援——救人者 -> 主机 -> 被救者(targetId)，ReliableOrdered
+        EnemyDamage = 33,       // 双向：协作共享血量——敌人受玩家攻击的伤害(key, dmg)，ReliableOrdered
+        EnemyDied = 34,         // 双向：协作共享血量——敌人死亡(key)，ReliableOrdered
+        EnemyStateSnapshot = 35,// 主机 -> 客机：协作共享血量——全量状态快照(敌人 key->hpPct + 死亡 key)，Sequenced
     }
 
     public class NetworkManager : MonoBehaviour, INetEventListener
@@ -126,6 +130,12 @@ namespace RL2Multiplayer
         private float _transformSendTimer;
         private float _animSendTimer;
         private bool _lastSentDowned;
+        // v1.7.9：downed 事件包周期性重发，修复"尸体消失 / 长按 H 找不到目标"。
+        // 旧版只在状态翻转瞬间发一次 Reliable；若那一刻接收端分身尚未创建，
+        // SetRemoteDowned 会直接 return 丢弃状态，之后永不补发 -> 尸体一直显示成活人、
+        // RemoteDowned 集合也为空（救援目标搜不到）。改为倒地期间每 0.5s 重发一次。
+        private float _downResendTimer;
+        private const float DownResendInterval = 0.5f;
 
         public bool IsReconnecting { get { return _reconnecting; } }
         public int ReconnectAttempt { get { return _reconnectAttempt; } }
@@ -139,6 +149,20 @@ namespace RL2Multiplayer
 
         private void Update()
         {
+            PumpNetwork();
+        }
+
+        /// <summary>
+        /// 网络收发泵。v1.8.0：除了 MonoBehaviour.Update，还由 Bootstrap.Tick(onBeforeRender)
+        /// 驱动一次——游戏暂停(Time.timeScale=0)时若不保险，可能漏收发。用 frameCount 守卫
+        /// 保证同一帧只泵一次，不重复发包/重入。
+        /// </summary>
+        private int _lastPumpFrame = -1;
+        internal void PumpNetwork()
+        {
+            if (_lastPumpFrame == Time.frameCount) return;
+            _lastPumpFrame = Time.frameCount;
+
             _rateLimitTimer += Time.unscaledDeltaTime;
             if (_rateLimitTimer >= 2f)
             {
@@ -187,6 +211,7 @@ namespace RL2Multiplayer
                 GhostSweep();
                 TickPendingHellos();
                 MapSync.HostTick();
+                EnemySync.HostTick();   // v1.8.0：协作共享血量状态快照（权威对账）
             }
             else
             {
@@ -559,9 +584,15 @@ namespace RL2Multiplayer
             SendToPeers(w, DeliveryMethod.Sequenced);
             _sendCountSinceLastLog++;
 
-            // downed 是事件型状态：只在变化瞬间发一次 Reliable 包，不随位置刷
-            if (p.Downed != _lastSentDowned)
+            // downed 状态：变化时立即发（Reliable）；此外倒地期间每 0.5s 重发一次，
+            // 保证迟到创建的分身 / 曾丢包的一端最终也能同步到"倒地"，尸体不会消失，
+            // 救援端也能一直搜到目标。起身（false）只发一次即可。
+            _downResendTimer += Time.unscaledDeltaTime;
+            bool downedChanged = p.Downed != _lastSentDowned;
+            bool downedResend = p.Downed && _downResendTimer >= DownResendInterval;
+            if (downedChanged || downedResend)
             {
+                _downResendTimer = 0f;
                 _lastSentDowned = p.Downed;
                 var wf = new NetDataWriter();
                 wf.Put((byte)MsgType.PlayerFlags);
@@ -685,6 +716,32 @@ namespace RL2Multiplayer
             {
                 _serverPeer.Send(w, method);
             }
+        }
+
+        /// <summary>
+        /// 协作救援：救人者长按 H 完成后调用。带上被救者 playerId，发给主机；
+        /// 主机收到后按 targetId 定向转交给被救者本人（见 OnNetworkReceive 的 CoOpRescue 分支）。
+        /// </summary>
+        internal void SendCoOpRescue(int targetId)
+        {
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.CoOpRescue);
+            w.Put(targetId);
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+            Plugin.Log.LogInfo("[RL2MP] [COOP] 发出救援请求 -> targetId=" + targetId
+                + " (isHost=" + IsHost + ")");
+        }
+
+        /// <summary>协作共享血量：把已经写好的 EnemyDamage / EnemyDied 包发出（主机中转给其他端）。</summary>
+        internal void SendEnemyDamage(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v1.8.0：主机广播敌人血量全量快照（Sequenced——新快照覆盖旧的，暂停/丢包后用最新一帧对账）。</summary>
+        internal void SendEnemySnapshot(NetDataWriter w)
+        {
+            if (IsHost) SendToPeers(w, DeliveryMethod.Sequenced);
         }
 
         /// <summary>HOST：等待 Hello 超时的兜底——旧版本客户端不会发 Hello，按新玩家注册。</summary>
@@ -949,7 +1006,8 @@ namespace RL2Multiplayer
 
         /// <summary>计分规则（主机权威）。v1.7.2 追加：开箱分值 4 档 + 金币折算。</summary>
         public void SendScoreConfig(RaceGameMode mode, int room, int enemy, int boss, int relic, int death, int decay,
-            int chestBronze, int chestSilver, int chestGold, int chestFairy, int goldPerPoint, float goldNgPlusStep)
+            int chestBronze, int chestSilver, int chestGold, int chestFairy, int goldPerPoint, float goldNgPlusStep,
+            PlayStyle style)
         {
             var w = new NetDataWriter();
             w.Put((byte)MsgType.ScoreConfig);
@@ -966,6 +1024,7 @@ namespace RL2Multiplayer
             w.Put(chestFairy);
             w.Put(goldPerPoint);
             w.Put(goldNgPlusStep);
+            w.Put((byte)style); // v1.7.6：玩法维度，放末尾保证旧字段位置不变
             SendToAllReliable(w, false);
         }
 
@@ -1296,7 +1355,7 @@ namespace RL2Multiplayer
             SendScoreConfig(Score.Mode, Score.RoomPoints, Score.EnemyPoints, Score.BossPoints,
                 Score.RelicPenalty, Score.DeathPenalty, Score.DecayPerMinute,
                 Score.ChestBronzePoints, Score.ChestSilverPoints, Score.ChestGoldPoints, Score.ChestFairyPoints,
-                Score.GoldPerPoint, Score.GoldNgPlusStep);
+                Score.GoldPerPoint, Score.GoldNgPlusStep, Score.Style);
             if (Race.InSession)
             {
                 var w4 = new NetDataWriter();
@@ -1674,6 +1733,54 @@ namespace RL2Multiplayer
                         PlayerSync.Instance.HandleRemoteFlags(id, downed);
                     }
                 }
+                else if (type == (byte)MsgType.CoOpRescue)
+                {
+                    int targetId = reader.GetInt();
+                    if (IsHost)
+                    {
+                        // 主机中转给所有客机：被救者本人起身，其他端清掉尸体标志
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.CoOpRescue);
+                        fw.Put(targetId);
+                        SendToPeers(fw, DeliveryMethod.ReliableOrdered);
+                    }
+                    // 被救者本人（主机自己或收到转发的客机）起身；其他端同步状态
+                    CoOpRescue.OnRescueReceived(targetId);
+                    CoOpRescue.OnRescueBroadcast(targetId);
+                    Plugin.Log.LogInfo("[RL2MP] [COOP] RECV CoOpRescue targetId=" + targetId
+                        + " (isHost=" + IsHost + ", localId=" + LocalPlayerId + ")");
+                }
+                else if (type == (byte)MsgType.EnemyDamage || type == (byte)MsgType.EnemyDied)
+                {
+                    int senderId = reader.GetInt();
+                    int key = reader.GetInt();
+                    bool died = type == (byte)MsgType.EnemyDied;
+                    float dmg = died ? 0f : reader.GetFloat();
+
+                    // 主机中转给其他客机（不回发送者本人）
+                    if (IsHost)
+                    {
+                        RelayToOtherClients(senderId, delegate (NetDataWriter rw)
+                        {
+                            rw.Put((byte)type);
+                            rw.Put(senderId);
+                            rw.Put(key);
+                            if (!died) rw.Put(dmg);
+                        });
+                    }
+
+                    // 发送者自己不应用（它本地已由原生伤害结算扣过血）
+                    if (senderId != LocalPlayerId && EnemySync.Active)
+                    {
+                        if (died) EnemySync.ApplyRemoteDeath(key);
+                        else EnemySync.ApplyRemoteDamage(key, dmg);
+                    }
+                }
+                else if (type == (byte)MsgType.EnemyStateSnapshot)
+                {
+                    // v1.8.0：主机权威血量快照——客机用它对账（晚加入 / 暂停错过事件 / 丢包都能追上）
+                    if (!IsHost && EnemySync.Active) EnemySync.ApplySnapshot(reader);
+                }
                 else if (type == (byte)MsgType.Projectile)
                 {
                     int id = reader.GetInt();
@@ -1830,8 +1937,12 @@ namespace RL2Multiplayer
                     int chestF = reader.GetInt();
                     int goldPerPoint = reader.GetInt();
                     float goldStep = reader.GetFloat();
+                    // v1.7.6：玩法维度放包末尾；旧版主机没有这个字节，读不到就保持默认竞速
+                    PlayStyle style = PlayStyle.Race;
+                    try { style = (PlayStyle)reader.GetByte(); }
+                    catch { /* 旧版协议兼容 */ }
                     Score.ApplyConfig(mode, roomP, enemyP, bossP, relicP, deathP, decayP,
-                        chestB, chestS, chestG, chestF, goldPerPoint, goldStep);
+                        chestB, chestS, chestG, chestF, goldPerPoint, goldStep, style);
                 }
                 else if (type == (byte)MsgType.ScoreState)
                 {

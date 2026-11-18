@@ -155,6 +155,8 @@ namespace RL2Multiplayer
             }
             RemotePlayers.Clear();
             RemoteInterpolators.Clear();
+            RemoteDowned.Clear();       // v1.7.9：换场景/重连时一并清倒地状态，避免残留幽灵尸体
+            _downVisualPending.Clear();
             if (count > 0)
             {
                 Plugin.Log.LogInfo("[RL2MP] [REMOTE] Cleared " + count + " remote player objects.");
@@ -470,6 +472,13 @@ namespace RL2Multiplayer
                 Plugin.Log.LogInfo("[RL2MP] [REMOTE] Adding RemotePlayerInterpolator component to RemotePlayer_" + id);
                 interpolator = go.AddComponent<RemotePlayerInterpolator>();
             }
+
+            // v1.7.9：若该 id 曾在我们没有分身时被标记倒地（downed 事件先到），现在补套。
+            if (createdNew && RemoteDowned.Contains(id))
+            {
+                Plugin.Log.LogInfo("[RL2MP] [REMOTE] ID=" + id + " 新建分身时补套倒地外观（downed 曾早到）。");
+                ApplyDownedVisual(go, true, id);
+            }
             return createdNew;
         }
 
@@ -520,35 +529,49 @@ namespace RL2Multiplayer
         public void SetRemoteDowned(int id, bool downed)
         {
             GameObject go;
-            if (!RemotePlayers.TryGetValue(id, out go) || go == null) return;
+            RemotePlayers.TryGetValue(id, out go); // v1.7.9：分身可能还没创建，不再提前 return
 
             bool was = RemoteDowned.Contains(id);
-            if (downed == was) return;
+            if (downed == was && (go == null || !_downVisualPending.Contains(id))) return;
 
+            // v1.7.9 关键修复：先无条件记录/清除状态。旧版在分身不存在时直接 return，
+            // 而 downed 事件包只发一次 -> 状态永久丢失：尸体显示为活人、RemoteDowned
+            // 集合为空导致长按 H 搜不到救援目标。现在状态先落地，分身一旦创建就补套外观。
             if (downed)
             {
                 RemoteDowned.Add(id);
-                var interp = go.GetComponent<RemotePlayerInterpolator>();
-                if (interp != null) interp.SetTarget(go.transform.position, true, true);
+                if (go == null) _downVisualPending.Add(id); // 等分身创建后补套灰化/冻结
             }
             else
             {
                 RemoteDowned.Remove(id);
+                _downVisualPending.Remove(id);
             }
 
-            // 倒地变灰半透明；克隆模式下没有根级 SpriteRenderer，
-            // 且 SkinnedMeshRenderer 材质与本地玩家共享，改色会连累原体——先跳过调色，
-            // 倒地视觉靠冻结位置表达（SetTarget 不再更新）。
-            var sr = go.GetComponent<SpriteRenderer>();
-            if (sr != null)
-            {
-                sr.color = downed
-                    ? new Color(0.55f, 0.55f, 0.55f, 0.35f)
-                    : new Color(1f, 1f, 1f, 0.95f);
-            }
+            if (go == null) return; // 状态已记住，外观等分身就绪再套
 
+            ApplyDownedVisual(go, downed, id);
             Plugin.Log.LogInfo("[RL2MP] [REMOTE] id=" + id + (downed ? " is DOWN" : " is back UP")
                 + " (downedCount=" + RemoteDowned.Count + "/" + RemotePlayers.Count + ")");
+        }
+
+        /// <summary>倒地意图已记录但分身当时不存在的 id，分身创建后补套外观。</summary>
+        private readonly HashSet<int> _downVisualPending = new HashSet<int>();
+
+        /// <summary>统一套用/恢复倒地外观（冻结位置 + 灰化）。倒地者位置来自其稳定广播坐标。</summary>
+        private void ApplyDownedVisual(GameObject go, bool downed, int id)
+        {
+            var interp = go.GetComponent<RemotePlayerInterpolator>();
+            if (interp != null)
+            {
+                if (downed)
+                    interp.SetTarget(go.transform.position, true, true); // freeze 在原地
+                else
+                    interp.SetTarget(go.transform.position, true, false);
+            }
+            // 克隆模式下没有根级 SpriteRenderer，且材质与本地玩家共享，改色会连累原体，
+            // 因此不对克隆做逐 renderer 调色；倒地视觉靠冻结位置 + HUD/尸体标记表达。
+            _downVisualPending.Remove(id);
         }
 
         // ---------------- 远程玩家外观（从本地玩家身上抄 sprite / 缩放 / 排序层） ----------------

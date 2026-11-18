@@ -10,7 +10,7 @@ using UnityEngine.SceneManagement;
 
 namespace RL2Multiplayer
 {
-    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "1.7.5")]
+    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "1.8.2")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
@@ -67,7 +67,7 @@ namespace RL2Multiplayer
             Log = Logger;
             Instance = this;
 
-            Log.LogInfo("[RL2MP] === Plugin Awake START (v1.7.5) ===");
+            Log.LogInfo("[RL2MP] === Plugin Awake START (v1.8.2) ===");
 
             Log.LogInfo("[RL2MP] Binding BepInEx config entries...");
             HostAddressCfg = Config.Bind<string>("Network", "HostAddress", "127.0.0.1", "主机 IP 地址（客户端连接时使用）");
@@ -80,6 +80,8 @@ namespace RL2Multiplayer
             _harmony = new Harmony("com.rl2.mp");
             _harmony.PatchAll();
             DownedPatches.Apply(_harmony);
+            CoOpRescue.Apply(_harmony);
+            EnemySync.Apply(_harmony);
             SeedSync.Apply(_harmony);
             RacePatches.Apply(_harmony);
             ScorePatches.Apply(_harmony);
@@ -189,9 +191,15 @@ namespace RL2Multiplayer
             Ensure("sceneLoaded:" + scene.name);
         }
 
-        /// <summary>看门狗：万一对象又被游戏清掉，1 秒内重建。</summary>
+        /// <summary>看门狗：万一对象又被游戏清掉，1 秒内重建。
+        /// v1.8.2：不再泵网络（渲染路径做网络收发+全场景扫描会卡顿；Update 用
+        /// unscaledDeltaTime 暂停时照常跑，本就不需要第二驱动）。</summary>
         internal static void Tick()
         {
+            // v1.8.2：不再在 onBeforeRender 里泵网络。onBeforeRender 处于渲染路径，
+            // 在这里做 PollEvents + FindObjectsOfType(全场景扫描) 会阻塞渲染→严重卡顿。
+            // NetworkManager.Update 用 unscaledDeltaTime，游戏暂停(timeScale=0)时照样每帧跑，
+            // 收发本就不中断，无需第二驱动。这里只保留看门狗（对象被清掉时重建）。
             if (_root != null) return;
 
             float now = Time.realtimeSinceStartup;

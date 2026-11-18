@@ -409,7 +409,8 @@ namespace RL2Multiplayer
                     GUILayout.Label("等待主机设定终点 Boss...");
                 }
 
-                GUILayout.Label("判定: " + Score.ModeName(Score.Mode) + " · " + Score.RuleLine());
+                GUILayout.Label("玩法: " + Score.StyleName(Score.Style) + " · 判定: " + Score.ModeName(Score.Mode)
+                    + " · " + Score.RuleLine());
                 GUILayout.Label(Score.Mode == RaceGameMode.Score
                     ? "死亡立即原地复活，并扣 " + Score.DeathPenalty + " 分"
                     : "死亡立即原地复活，成绩 +" + (int)Race.PenaltyPerDeath + " 秒/次");
@@ -417,6 +418,36 @@ namespace RL2Multiplayer
             }
 
             // ---------------- 主机视角：规则 ----------------
+            // v1.7.6：玩法维度（竞速 / 协作）与判定方式正交，只允许开赛前切换
+            GUILayout.BeginHorizontal();
+            GUILayout.Label("玩法:", GUILayout.Width(40));
+            bool canSwitchStyle = Race.Phase == RacePhase.Idle || Race.Phase == RacePhase.WaitingReady;
+            GUIStyle raceStyle = Score.Style == PlayStyle.Race ? GUI.skin.box : GUI.skin.button;
+            if (GUILayout.Button("竞速", raceStyle, GUILayout.Width(70)) && canSwitchStyle
+                && Score.Style != PlayStyle.Race)
+            {
+                Score.Style = PlayStyle.Race;
+                Score.BroadcastConfig();
+                Plugin.Log.LogInfo("[RL2MP] [UI] HOST 切换玩法 -> 竞速");
+            }
+            GUIStyle coopStyle = Score.Style == PlayStyle.CoOp ? GUI.skin.box : GUI.skin.button;
+            if (GUILayout.Button("双人协作", coopStyle, GUILayout.Width(80)) && canSwitchStyle
+                && Score.Style != PlayStyle.CoOp)
+            {
+                Score.Style = PlayStyle.CoOp;
+                Score.BroadcastConfig();
+                Plugin.Log.LogInfo("[RL2MP] [UI] HOST 切换玩法 -> 双人协作");
+            }
+            GUILayout.EndHorizontal();
+            GUILayout.Label(canSwitchStyle
+                ? (Score.Style == PlayStyle.CoOp
+                    ? "协作: 两人同图、齐门过房、倒地救援（行为规则后续版本启用，当前同竞速）"
+                    : "竞速: 各跑各的，先到终点者胜")
+                : "玩法已锁定（比赛进行中不可切换，回大厅后可改）");
+
+            // 协作模式不比用时/得分，判定方式与计分规则整块隐藏
+            if (Score.Style == PlayStyle.Race)
+            {
             GUILayout.BeginHorizontal();
             GUILayout.Label("判定方式:", GUILayout.Width(64));
             GUIStyle timeStyle = Score.Mode == RaceGameMode.Time ? GUI.skin.box : GUI.skin.button;
@@ -480,6 +511,7 @@ namespace RL2Multiplayer
                 GUILayout.Label("同一房间/同一个箱子反复进不重复计分");
                 GUILayout.EndHorizontal();
             }
+            } // if (Score.Style == PlayStyle.Race)
 
             // 首位完成后给其他人的宽限时间（0 = 立刻结算）
             GUILayout.BeginHorizontal();

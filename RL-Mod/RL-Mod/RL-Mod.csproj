@@ -77,6 +77,8 @@
     <Compile Include="Plugin.cs" />
     <Compile Include="ControlPanel.cs" />
     <Compile Include="Downed.cs" />
+    <Compile Include="CoOpRescue.cs" />
+    <Compile Include="EnemySync.cs" />
     <Compile Include="NetworkManager.cs" />
     <Compile Include="PlayerSync.cs" />
     <Compile Include="SeedSync.cs" />

@@ -867,6 +867,11 @@ namespace RL2Multiplayer
 
             // 会话重置：观战期间激活的房间全部关回去
             RestoreSpectateRooms(null);
+
+            // v1.7.8：协作倒地/血上限惩罚一并清理（换场景=换楼层/回城，属于新的一段）。
+            CoOpRescue.ResetAll(reason);
+            // v1.7.9：共享血量的防循环标志一并清理。
+            EnemySync.ResetAll();
         }
 
         /// <summary>调试用：把所有远程玩家标记为倒地，用来验证"全员倒下 -> 真实死亡"。</summary>
@@ -928,6 +933,11 @@ namespace RL2Multiplayer
             }
 
             if (!LocalDown) return;
+
+            // v1.7.8：协作倒地待救由 CoOpRescue 全权管理（自救窗口/救援/惩罚），
+            // 绝不走竞速观战的"8 秒无人自动复活 / 全员倒下真死"——否则救援规则被破坏。
+            if (Score.Style == PlayStyle.CoOp && CoOpRescue.LocalDown)
+                return;
 
             var target = EnsureTarget();
             if (target != null)
@@ -1026,7 +1036,10 @@ namespace RL2Multiplayer
             DownedState.TrackBody();
             DownedState.Tick();
             RoomFix.Tick();
+            CoOpRescue.Tick();
 
+            // 协作待救状态由 CoOpRescue 管理，不走竞速观战的 [ ] 切换
+            if (CoOpRescue.LocalDown) return;
             if (!DownedState.LocalDown) return;
 
             if (Input.GetKeyDown(KeyCode.LeftBracket))
@@ -1118,13 +1131,21 @@ namespace RL2Multiplayer
                     return true;
                 }
 
-                // v1.6.4：联机期间死亡一律立即原地复活。
-                // 旧逻辑只在竞速阶段（Countdown/Racing）复活，竞速结算后死亡会进
-                // 倒地观战 —— 2 人局里另一人还活着，倒地的人永远等不到自动复活，
-                // 只能手动按复活键（真机测试中用户明确反馈这是糟糕体验）。
-                // 非竞速阶段的死亡 QuickRespawn 内部的 OnLocalDeath 会因
-                // Phase != Racing 直接跳过加时记账，不会污染成绩。
-                DownedState.QuickRespawn("KillCharacter");
+                // v1.7.8：按玩法分流。
+                //   协作（CoOp）：不立即复活，留尸体待救 + 血上限惩罚（CoOpRescue）。
+                //   竞速（Race）：保持 v1.6.4 的立即原地复活 + 加时。
+                // 注意这里两条路都必须拦下真死（return false），否则会走游戏原生死亡回城。
+                if (Score.Style == PlayStyle.CoOp)
+                {
+                    CoOpRescue.OnLocalDown("KillCharacter");
+                }
+                else
+                {
+                    // 竞速：联机期间死亡一律立即原地复活。
+                    // 非竞速阶段的死亡 QuickRespawn 内部 OnLocalDeath 会因
+                    // Phase != Racing 跳过加时记账，不污染成绩。
+                    DownedState.QuickRespawn("KillCharacter");
+                }
                 return false;
             }
             catch (Exception ex)
