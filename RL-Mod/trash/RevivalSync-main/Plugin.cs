@@ -1,0 +1,457 @@
+using System;
+using System.Collections.Generic;
+using System.IO;
+using BepInEx;
+using BepInEx.Configuration;
+using BepInEx.Logging;
+using HarmonyLib;
+using Photon.Pun;
+using UnityEngine;
+
+namespace RevivalSync
+{
+    [BepInPlugin(PluginGuid, PluginName, PluginVersion)]
+    public class Plugin : BaseUnityPlugin
+    {
+        public const string PluginGuid = "com.Revival.revivalsync";
+        public const string PluginName = "RevivalSync";
+        public const string PluginVersion = "1.6.1";
+
+        internal static ManualLogSource Log;
+
+        // simulation
+        internal static ConfigEntry<bool> SimulateCarts;
+        internal static ConfigEntry<bool> SimulateHinges;
+        internal static ConfigEntry<bool> SimulateItems;
+        internal static ConfigEntry<bool> InstantWeapons;
+        internal static ConfigEntry<bool> InstantCartHandle;
+        internal static ConfigEntry<float> PassiveSyncStrength;
+        internal static ConfigEntry<float> PostThrowGrace;
+        internal static ConfigEntry<float> SnapDistance;
+        internal static ConfigEntry<float> HeldDriftHandbackAt;
+        // network tweaks
+        internal static ConfigEntry<bool> DisableTimeout;
+        internal static ConfigEntry<bool> PhotonLateUpdate;
+        internal static ConfigEntry<bool> SmoothSync;
+        internal static ConfigEntry<bool> TrajectoryMatching;
+        internal static ConfigEntry<bool> ResetToDefaults;
+        internal static ConfigEntry<bool> HostAssistEnabled;
+        private static bool resetting;
+        internal static ConfigEntry<bool> Extrapolate;
+        internal static ConfigEntry<float> Future;
+        internal static ConfigEntry<float> RateSmoothing;
+        internal static ConfigEntry<float> TimingThreshold;
+        // debugging
+        internal static ConfigEntry<bool> VerboseLogging;
+        internal static ConfigEntry<string> ResyncKey;
+        internal static ConfigEntry<float> AutoResyncSeconds;
+
+        // ---- Resync key: parsed from the string config, tolerant of casing/aliases ----
+        private static string resyncKeyRaw;
+        private static KeyCode resyncKeyCode = KeyCode.F8;
+
+        /// <summary>The configured resync key, parsed once and cached until the text
+        /// changes. KeyCode.None disables it. Common aliases (space, esc, del, digits,
+        /// "mouse3", "ctrl") are accepted so users don't have to know Unity's exact names.</summary>
+        internal static KeyCode ResyncKeyCode
+        {
+            get
+            {
+                string raw = ResyncKey?.Value;
+                if (raw != resyncKeyRaw)
+                {
+                    resyncKeyRaw = raw;
+                    resyncKeyCode = ParseKey(raw);
+                    Log.LogInfo($"Resync key set to {resyncKeyCode} (from \"{raw}\").");
+                }
+                return resyncKeyCode;
+            }
+        }
+
+        private static KeyCode ParseKey(string raw)
+        {
+            if (string.IsNullOrWhiteSpace(raw)) return KeyCode.None;
+            string s = raw.Trim();
+
+            // Enum.TryParse handles the exact Unity names (F8, Mouse3, Keypad5, LeftAlt...)
+            // case-insensitively — that covers the large majority of inputs
+            if (Enum.TryParse(s, true, out KeyCode direct) && Enum.IsDefined(typeof(KeyCode), direct))
+            {
+                return direct;
+            }
+
+            // friendly aliases for the names people actually type
+            switch (s.ToLowerInvariant().Replace(" ", ""))
+            {
+                case "none":
+                case "off":
+                case "disabled": return KeyCode.None;
+                case "space":
+                case "spacebar": return KeyCode.Space;
+                case "esc": return KeyCode.Escape;
+                case "enter":
+                case "return": return KeyCode.Return;
+                case "del": return KeyCode.Delete;
+                case "ins": return KeyCode.Insert;
+                case "ctrl":
+                case "control":
+                case "leftctrl":
+                case "lctrl": return KeyCode.LeftControl;
+                case "rightctrl":
+                case "rctrl": return KeyCode.RightControl;
+                case "alt":
+                case "leftalt":
+                case "lalt": return KeyCode.LeftAlt;
+                case "shift":
+                case "leftshift":
+                case "lshift": return KeyCode.LeftShift;
+                // Unity's own names Mouse0..Mouse6 are matched by the direct parse above
+                // (Mouse2 = middle, Mouse3/4 = side buttons). These are just friendlier
+                // spellings for the same buttons.
+                case "middlemouse":
+                case "mousemiddle": return KeyCode.Mouse2;
+                case "rightmouse": return KeyCode.Mouse1;
+                case "leftmouse": return KeyCode.Mouse0;
+            }
+
+            // a single digit types as "5", but the enum name is "Alpha5"
+            if (s.Length == 1 && s[0] >= '0' && s[0] <= '9'
+                && Enum.TryParse("Alpha" + s, out KeyCode digit))
+            {
+                return digit;
+            }
+
+            Log.LogWarning($"Resync key \"{raw}\" is not a recognized key name — resync key disabled. " +
+                           "Try a name like F8, K, Mouse3 or None.");
+            return KeyCode.None;
+        }
+
+        /// <summary>
+        /// False until the game initializes Photon itself. Touching PhotonNetwork before
+        /// that (including PATCHING its methods!) forces Photon's dispatcher object into
+        /// existence during plugin loading, which silently kills all connectivity.
+        /// </summary>
+        internal static bool PhotonReady;
+
+        private static Harmony harmony;
+        private static bool capturePatched;
+
+        /// <summary>Applies the PhotonNetwork.OnSerializeRead capture patch once Photon is
+        /// up — never earlier (see PhotonReady).</summary>
+        internal static void EnsureCapturePatch()
+        {
+            if (capturePatched || !PhotonReady || harmony == null) return;
+            capturePatched = true;
+            try
+            {
+                harmony.PatchAll(typeof(Patches.SerializeReadCapturePatch));
+                Log.LogInfo("Host-state capture hooked (deferred until Photon start).");
+            }
+            catch (Exception e)
+            {
+                Log.LogError($"Failed to hook host-state capture: {e}");
+            }
+        }
+
+        private void Awake()
+        {
+            Log = Logger;
+
+            // ---- 1. Main: the on/off switches. Everything here is safe to flip. ----
+            SimulateCarts = Config.Bind("1. Main", "Instant Carts", true,
+                "Carts respond the moment you grab and push them, no waiting on the host. " +
+                "Only turn this off if carts misbehave for you. Changes apply from the " +
+                "next level.");
+            SimulateHinges = Config.Bind("1. Main", "Instant Doors", true,
+                "Doors and cabinets swing the moment you touch them, no waiting on the host. " +
+                "Only turn this off if doors misbehave for you. Takes full effect on the " +
+                "next game launch.");
+            SimulateItems = Config.Bind("1. Main", "Instant Items", true,
+                "Grenades, tools and gadgets follow your hand instantly and fly the way you " +
+                "throw them. Damage and explosions are still decided by the host, like normal. " +
+                "Vehicles, switched-on drones and the duck always use the game's normal sync " +
+                "(they move themselves). Only turn this off if an item misbehaves for you. " +
+                "Changes apply from the next level.");
+            InstantWeapons = Config.Bind("1. Main", "Instant Weapons (experimental)", false,
+                "Guns and melee weapons follow your hand instantly: the game's own aiming, " +
+                "turning and swinging runs on your side for the weapon you hold. Shots and hits " +
+                "are still decided by the host. OFF = weapons use the game's normal sync " +
+                "(always correct, but with the usual delay in your hand). Needs Instant Items " +
+                "on. Changes apply from the next level.");
+            DisableTimeout = Config.Bind("1. Main", "No Timeout Kicks", true,
+                "Stops the game from kicking you out of the lobby during short lag spikes.");
+            // a plain string (not a KeyCode enum): REPOConfig renders enums as a slider
+            // through all ~500 key names, which is unusable. A string gets a typable box.
+            ResyncKey = Config.Bind("1. Main", "Resync Loot Key", "F8",
+                "Emergency desync fix: press this key to instantly teleport every synced " +
+                "object to exactly where the host sees it. Type any key name here, for example: " +
+                "F8, K, Mouse3, Keypad5, LeftAlt, Backspace. Set it to None to turn the key off.");
+            AutoResyncSeconds = Config.Bind("1. Main", "Auto Resync Seconds", 0f,
+                new ConfigDescription(
+                    "0 = off. If set, automatically performs the Resync Loot teleport every " +
+                    "this many seconds, so you never have to press the key yourself.",
+                    new AcceptableValueRange<float>(0f, 120f)));
+            TrajectoryMatching = Config.Bind("1. Main", "Trajectory Matching (experimental)", false,
+                "Thrown items and carts you push follow the host's path while they move, instead " +
+                "of flying on your screen alone and then settling where the host has them. " +
+                "Turn it on and off in the same session to compare. Takes effect on your next throw.");
+            // a NEW key (was "Host Assist (experimental)", default off): the old key's saved
+            // "false" would otherwise keep it off for everyone who ever ran 1.5.x
+            HostAssistEnabled = Config.Bind("1. Main", "Host Assist", true,
+                "Automatic: switches itself on whenever the host also has RevivalSync. What you " +
+                "hold is sent straight to the host, so the host's copy follows yours instead of " +
+                "trailing behind, and throws fly the same on every screen. With a host that does " +
+                "not have the mod nothing changes. When you host, it lets your friends' carts and " +
+                "loot do the same. Turn this OFF to force it off.");
+            SmoothSync = Config.Bind("1. Main", "Smooth Enemies", true,
+                "Enemies and other host-controlled things move smoothly instead of stuttering. " +
+                "Takes effect on the next game launch.");
+
+            // ---- 2. Fine-Tuning: the defaults are good. Touch only if asked to. ----
+            const string tuning = "2. Fine-Tuning (defaults are good)";
+            PassiveSyncStrength = Config.Bind(tuning, "World Sync Strength", 0.075f,
+                new ConfigDescription(
+                    "How firmly the world is pulled toward what the host sees. Higher = tighter sync " +
+                    "but harsher corrections, lower = gentler but objects drift longer.",
+                    new AcceptableValueRange<float>(0.01f, 0.5f)));
+            PostThrowGrace = Config.Bind(tuning, "Throw Freedom Seconds", 0.6f,
+                new ConfigDescription(
+                    "How long a thrown object flies purely on your screen before syncing takes over again.",
+                    new AcceptableValueRange<float>(0f, 3f)));
+            SnapDistance = Config.Bind(tuning, "Teleport Distance", 6f,
+                new ConfigDescription(
+                    "If an object ends up further than this many meters from where the host has it, " +
+                    "it teleports there instead of gliding. Do NOT set this low: a cart you are steering " +
+                    "naturally rides up to ~3m from the host's copy, so a low value makes it teleport " +
+                    "constantly — through you and scattering its loot. 6 is the sweet spot.",
+                    new AcceptableValueRange<float>(4f, 30f)));
+            HeldDriftHandbackAt = Config.Bind(tuning, "Held Object Give Up At", 4f,
+                new ConfigDescription(
+                    "While you hold something: if it stays further off than this many meters (e.g. the " +
+                    "host's copy got stuck), control returns to the host until you grab it again.",
+                    new AcceptableValueRange<float>(1f, 20f)));
+            InstantCartHandle = Config.Bind(tuning, "Instant Cart Handle", true,
+                "Cart handle grabs register on your machine right away instead of waiting for the host.");
+            PhotonLateUpdate = Config.Bind(tuning, "Process Packets Every Frame", true,
+                "Handles network data every rendered frame instead of every physics tick. Lower felt latency.");
+            Extrapolate = Config.Bind(tuning, "Smooth Enemies - Extrapolate", true,
+                "Keep enemies moving on a predicted path for a moment when an update arrives late.");
+            Future = Config.Bind(tuning, "Smooth Enemies - Look Ahead", 1f,
+                new ConfigDescription(
+                    "How far ahead of the received data enemies are projected, in update intervals.",
+                    new AcceptableValueRange<float>(0f, 3f)));
+            RateSmoothing = Config.Bind(tuning, "Smooth Enemies - Rate Adapt", 0.1f,
+                new ConfigDescription(
+                    "How quickly the measured update rate adapts. Leave at 0.1 — high values make " +
+                    "enemies jitter with every network wobble.",
+                    new AcceptableValueRange<float>(0f, 1f)));
+            TimingThreshold = Config.Bind(tuning, "Smooth Enemies - Gap Seconds", 1f,
+                new ConfigDescription(
+                    "A silence longer than this many seconds counts as a gap instead of movement to smooth over.",
+                    new AcceptableValueRange<float>(0.2f, 5f)));
+
+            // ---- 3. Debug ----
+            VerboseLogging = Config.Bind("3. Debug", "Verbose Logging", false,
+                "Records everything the mod does into BepInEx/LogOutput.log. Turn this ON before " +
+                "reporting a bug and include that file with the report.");
+            ResetToDefaults = Config.Bind("3. Debug", "Reset All Settings To Default", false,
+                "Turn this ON to put every RevivalSync setting back to its default. It switches " +
+                "itself back OFF once done. (REPOConfig's own \"Reset To Default\" button does the " +
+                "same; its \"Revert\" button only undoes changes you have not saved yet.)");
+            ResetToDefaults.SettingChanged += (_, __) => ResetAllSettings();
+            // also honoured when switched on by editing the .cfg file while the game was closed
+            ResetAllSettings();
+
+            if (!SimManager.InitAccessors())
+            {
+                Log.LogError("RevivalSync could not find expected game internals (the game probably updated). " +
+                             "The mod has disabled itself to avoid breaking your game.");
+                // actually off: since game v0.5.0 this component's Update/FixedUpdate DO run,
+                // so returning from Awake alone left the per-frame driver ticking
+                enabled = false;
+                return;
+            }
+
+            harmony = new Harmony(PluginGuid);
+            int patched = 0, failed = 0;
+            // NOTE: SerializeReadCapturePatch is deliberately NOT in this list. Patching a
+            // PhotonNetwork method here would force Photon's static initialization during
+            // plugin loading, which silently kills all connectivity ("no internet" bug).
+            // It is applied lazily by EnsureCapturePatch() once the game starts Photon.
+            Type[] patchTypes =
+            {
+                typeof(Patches.DriverHooksPatch),
+                typeof(Patches.PhotonHandlerAwakePatch),
+                typeof(Patches.HingeJointKeeperPatch),
+                typeof(Patches.HingePushPatch),
+                typeof(Patches.HingeImpulsePredictPatch),
+                typeof(Patches.HostAssistCartPatch),
+                typeof(Patches.PhysGrabObjectStartPatch),
+                typeof(Patches.GrabStartedPatch),
+                typeof(Patches.GrabEndedPatch),
+                typeof(Patches.GrabPlayerAddDedupePatch),
+                typeof(Patches.TransformViewUpdatePatch),
+                typeof(Patches.TransformViewSerializePatch),
+                typeof(Patches.CartAuthorityPatch),
+                typeof(Patches.WeaponAuthorityPatch),
+                typeof(Patches.MeleeScrollSwingPatch),
+                typeof(Patches.MeleeScrollSwingReceivePatch),
+                typeof(Patches.GunRecoilPatch),
+                typeof(Patches.ToggleClaimLogPatch),
+                typeof(Patches.UpgradeCreditLogPatch),
+            };
+            foreach (Type t in patchTypes)
+            {
+                try
+                {
+                    harmony.PatchAll(t);
+                    patched++;
+                }
+                catch (Exception e)
+                {
+                    failed++;
+                    Log.LogError($"Failed to apply patch {t.Name}: {e}");
+                }
+            }
+
+            if (SmoothSync.Value && Smoothing.InitAccessors())
+            {
+                try
+                {
+                    harmony.PatchAll(typeof(Smoothing.SerializePatch));
+                    harmony.PatchAll(typeof(Smoothing.UpdatePatch));
+                    harmony.PatchAll(typeof(Smoothing.TeleportPatch));
+                    harmony.PatchAll(typeof(Smoothing.EnablePatch));
+                    Smoothing.Active = true;
+                }
+                catch (Exception e)
+                {
+                    Log.LogError($"Failed to apply SmoothSync patches, interpolation disabled: {e}");
+                }
+            }
+
+            if (patched == 0)
+            {
+                Log.LogError("No patches could be applied — RevivalSync is inactive.");
+                enabled = false;
+                return;
+            }
+
+            Log.LogInfo($"{PluginName} {PluginVersion} loaded. Patches: {patched} ok, {failed} failed. " +
+                        $"SmoothSync: {Smoothing.Active}. Prediction activates when you join someone else's lobby; " +
+                        "while hosting, only Host Assist runs.");
+        }
+
+        /// <summary>Every RevivalSync setting back to its default, including the reset switch
+        /// itself (default OFF) — so it is a one-shot button that also works from the .cfg file.</summary>
+        private void ResetAllSettings()
+        {
+            if (resetting || ResetToDefaults == null || !ResetToDefaults.Value) return;
+            resetting = true;
+            bool saveEach = Config.SaveOnConfigSet;
+            try
+            {
+                Config.SaveOnConfigSet = false; // one write at the end, not one per setting
+                foreach (KeyValuePair<ConfigDefinition, ConfigEntryBase> kv in
+                         (IEnumerable<KeyValuePair<ConfigDefinition, ConfigEntryBase>>)Config)
+                {
+                    kv.Value.BoxedValue = kv.Value.DefaultValue;
+                }
+                Log.LogInfo("All RevivalSync settings were reset to their defaults.");
+            }
+            finally
+            {
+                Config.SaveOnConfigSet = saveEach;
+                Config.Save();
+                resetting = false;
+            }
+        }
+
+        // fallback drivers: the plugin component's loops did not run before game v0.5.0
+        // (verified), so the real drivers are Harmony hooks (Patches.DriverHooksPatch) —
+        // these stay as a harmless safety net, guarded against double-running
+        private void Update()
+        {
+            SimDriver.FrameUpdate();
+        }
+
+        private void FixedUpdate()
+        {
+            SimManager.Tick();
+        }
+
+        private void OnDestroy()
+        {
+            SimManager.RestoreAll();
+            ArchiveSessionLog(true);
+        }
+
+        private static string sessionLogPath;
+        private static float nextLogArchive;
+
+        /// <summary>
+        /// BepInEx overwrites LogOutput.log on every launch, which has already destroyed
+        /// bug-session evidence once. Keep a copy of each session's log in
+        /// BepInEx/RevivalSync-logs (newest 10 sessions), refreshed every minute so even
+        /// a crash or hard kill preserves most of it.
+        /// </summary>
+        internal static void ArchiveSessionLog(bool force = false)
+        {
+            try
+            {
+                if (!force && Time.unscaledTime < nextLogArchive) return;
+                nextLogArchive = Time.unscaledTime + 60f;
+
+                string src = Path.Combine(Paths.BepInExRootPath, "LogOutput.log");
+                if (!File.Exists(src)) return;
+
+                if (sessionLogPath == null)
+                {
+                    string dir = Path.Combine(Paths.BepInExRootPath, "RevivalSync-logs");
+                    Directory.CreateDirectory(dir);
+                    sessionLogPath = Path.Combine(dir, $"session-{DateTime.Now:yyyyMMdd-HHmmss}.log");
+                    FileInfo[] files = new DirectoryInfo(dir).GetFiles("session-*.log");
+                    Array.Sort(files, (a, b) => string.CompareOrdinal(b.Name, a.Name));
+                    for (int i = 9; i < files.Length; i++) files[i].Delete();
+                }
+                File.Copy(src, sessionLogPath, true);
+            }
+            catch
+            {
+                // archiving must never break the game or shutdown
+            }
+        }
+
+        /// <summary>
+        /// Plain Photon settings — nothing is patched for these, so they cannot conflict
+        /// with other mods. Must only run after the game has initialized Photon.
+        /// </summary>
+        internal static void ApplyPhotonSettings()
+        {
+            if (!PhotonReady) return;
+            try
+            {
+                if (PhotonLateUpdate.Value)
+                {
+                    PhotonNetwork.MinimalTimeScaleToDispatchInFixedUpdate = float.PositiveInfinity;
+                }
+
+                if (DisableTimeout.Value)
+                {
+                    var peer = PhotonNetwork.NetworkingClient?.LoadBalancingPeer;
+                    if (peer != null)
+                    {
+                        // one hour instead of int.MaxValue: Photon adds this to its clock,
+                        // so a huge value would overflow and instantly time out
+                        peer.DisconnectTimeout = 3600000;
+                        peer.SentCountAllowance = 10000;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                Log.LogWarning($"Could not apply Photon settings: {e.Message}");
+            }
+        }
+    }
+}

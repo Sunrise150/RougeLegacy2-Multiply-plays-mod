@@ -1,0 +1,10 @@
+D:\RL-Mod\RL-Mod.Core\bin\Release\netstandard2.0\RL-Mod.Core.deps.json
+D:\RL-Mod\RL-Mod.Core\bin\Release\netstandard2.0\RL-Mod.Core.dll
+D:\RL-Mod\RL-Mod.Core\bin\Release\netstandard2.0\RL-Mod.Core.pdb
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.csproj.AssemblyReference.cache
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.GeneratedMSBuildEditorConfig.editorconfig
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.AssemblyInfoInputs.cache
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.AssemblyInfo.cs
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.csproj.CoreCompileInputs.cache
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.dll
+D:\RL-Mod\RL-Mod.Core\obj\Release\netstandard2.0\RL-Mod.Core.pdb

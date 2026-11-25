@@ -16,3 +16,5 @@ D:\RL-Mod\RL-Mod\obj\Debug\RL-Mod.csproj.Up2Date
 D:\RL-Mod\RL-Mod\bin\Debug\UnityEngine.AnimationModule.dll
 D:\RL-Mod\RL-Mod\bin\Debug\UnityEngine.ParticleSystemModule.dll
 D:\RL-Mod\RL-Mod\bin\Debug\UnityEngine.TextRenderingModule.dll
+D:\RL-Mod\RL-Mod\bin\Debug\UnityEngine.UI.dll
+D:\RL-Mod\RL-Mod\bin\Debug\UnityEngine.Physics2DModule.dll

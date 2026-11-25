@@ -1,0 +1,28 @@
+<Project Sdk="Microsoft.NET.Sdk">
+    <Import Project="../../RL2.ModLoader.targets" />
+
+    <PropertyGroup>
+        <TargetFramework>net48</TargetFramework>
+        <Nullable>enable</Nullable>
+        <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+        <LangVersion>latest</LangVersion>
+        <RootNamespace>RL2.API</RootNamespace>
+        <Configurations>Release</Configurations>
+
+        <NoWarn>CS0436</NoWarn>
+    </PropertyGroup>
+
+    <PropertyGroup>
+        <UseCommonOutputDirectory>true</UseCommonOutputDirectory>
+        <BaseOutputPath>../bin</BaseOutputPath>
+        <AppendTargetFrameworkToOutputPath>false</AppendTargetFrameworkToOutputPath>
+        <AppendRuntimeIdentifierToOutputPath>false</AppendRuntimeIdentifierToOutputPath>
+        <GenerateDocumentationFile>true</GenerateDocumentationFile>
+    </PropertyGroup>
+
+    <ItemGroup>
+        <PackageReference Include="Krafs.Publicizer" Version="2.3.0" />
+        <Publicize Include="Assembly-CSharp" />
+    </ItemGroup>
+
+</Project>

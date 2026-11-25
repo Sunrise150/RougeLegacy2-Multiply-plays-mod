@@ -1,0 +1,1273 @@
+﻿# RevivalSync — Development Log & Hard-Won Lessons
+
+Reference for contributors (and future debugging). Chronological-ish, distilled.
+
+## Lineage
+- Successor/merger of two mods: **NetworkingRevived** (rewrite of the abandoned
+  `readthisifbad-NetworkingReworked`) and **NetworkTweaksRevived** (rewrite of
+  `BlueAmulet-REPONetworkTweaks`). Decompiled sources of both originals were studied heavily.
+- Why the originals broke: the game's overcharge update added a 6th field
+  (`physGrabBeamOverCharge`) to PhysGrabber's photon stream (NetworkingReworked re-wrote that
+  stream with 5 fields = packet corruption); RPC security guards (`SemiFunc.MasterOnlyRPC` /
+  `OwnerOnlyRPC`) were added; IL-pattern transpilers died on recompiled code.
+
+## Architecture (from the original NetworkingReworked — the thing that made it feel great)
+- **Passive shadowing**: every eligible PhysGrabObject is locally simulated from spawn;
+  while not locally held it is continuously blended toward the host's state (~0.075/tick).
+  No puppet<->simulation handoffs — handoff seams were the source of most desync bugs.
+- Local grab = instant authority: add self to `playerGrabbing` immediately, flip the private
+  `isMaster` field so `PhysicsGrabbingManipulation` runs, dedupe the host's later broadcast.
+- Host state captured at **`PhotonNetwork.OnSerializeRead`** (raw event array; data[0]=viewID,
+  component data from index 3; pattern-scan for [bool,bool,bool,V3,V3,V3,V3,Quat] which
+  self-aligns past other components' segments). Per-component capture proved unreliable.
+- `PhotonTransformView` suppressed for simulated objects (Update prefix skip; serialize read
+  = consume-and-discard 8 values to keep the stream aligned).
+- Excluded from simulation: enemies, tumbled players. Shop items (ItemAttributes) were excluded until 1.0.7 - that made tools/weapons feel laggy in hand (host-driven + Smoothing delay stacked); now simulated like valuables (config SimulateItems), item LOGIC stays host-gated.
+
+## The two foundational platform gotchas (cost days)
+1. **Never touch OR Harmony-patch `PhotonNetwork` during plugin load.** Its static ctor spawns
+   the PhotonMono dispatcher; created during chainloading it silently kills ALL connectivity
+   (game hangs at "connecting", zero errors — looks like no internet). Even patching one of
+   its methods triggers the ctor. Fix: defer via `PhotonHandler.Awake` postfix
+   (`PhotonReady` flag) + lazy `EnsureCapturePatch()`.
+2. **This game never runs Update/FixedUpdate on mod-created GameObjects or on the BepInEx
+   plugin component** (proven with filesystem markers). Every "driver loop" before v1.0.2 was
+   silently dead — the entire passive-sync machinery never executed; only Harmony patches ran.
+   Fix: drive loops via postfixes on `GameDirector.Update` (frame) and
+   `PlayerController.FixedUpdate` (physics), with frameCount/fixedTime double-run guards.
+   Corollary: all pre-1.0.2 "this feature doesn't work" verdicts were meaningless.
+   Also: AsyncLoggers buffers the log — hard-killing the game eats the tail; verify with
+   graceful close or file markers.
+
+## Sync-tuning lessons
+- **Photon sends only on change**: no packets = host copy at rest exactly at last hostPos.
+  Blending toward stale velocities makes objects vibrate/drift ("choppy"). `hostIdle`
+  (packetAge > 0.35s) => zero target velocities & settle; while flowing, lead the target by
+  packetAge. Use `MovePosition/MoveRotation` for blends (interpolation-aware); raw
+  `rb.position` writes render as stepping (keep them only for snaps).
+- **Held drift correction must be velocity-aware**: the host's copy ALWAYS trails a dragged
+  object by speed*lag; correcting that trail = permanent brake (the "ultra slow cart").
+  Allowance = speed*0.4, target led by hostVel*0.15; handback (vanilla control until re-grab)
+  when truly diverged.
+- **Carts aren't moved by grab forces when handle-held** — `CartSteer` directly drives
+  velocity toward a follow point (5/7 m/s caps) and disables grab forces
+  (`OverridePhysGrabForcesDisable`); its client-side preconditions are unreliable, so the
+  drive is replicated locally — but ONLY for handle grabs (grab-area list check): body/"weak"
+  drags are raw-force on the host and steering them locally desyncs hard.
+- **Cart cargo riding a locally-held cart must be exempt from passive sync** (riding markers
+  via `itemsInCart`), or it anchors the cart and tunnels through walls.
+- **Doors**: vanilla clients destroy the HingeJoint and the host force-flags doors kinematic
+  (`KinematicClientForce` each tick). Simulating them = keep the joint (operand-swap the
+  `SemiFunc.IsNotMasterClient` call in `PhysGrabHinge.Awake`), make it unbreakable (host
+  decides breaks; mirror the `broken` field), set `pgo.spawned=true` (gates hinge logic),
+  and run the game's OWN hinge logic locally via the authority transpiler on
+  `PhysGrabHinge.FixedUpdate`. The "door spring" is actually host-gated close-torque code
+  in that method — don't fight it, run it.
+- Stuck-in-geometry objects need a timed Snap (blending can't push through walls).
+- kinematicClientForced pollutes streamed `isKinematic` — ignore it for held-object logic.
+
+## Ops
+- Build: `dotnet build -c Release` (game/BepInEx paths via gitignored `LocalPaths.props`).
+- `update-package.ps1` = build + refresh `package/` + local TMM profile + upload zip in `bin/`.
+- Publish: bump version in Plugin.cs + manifest.json + csproj + CHANGELOG, then upload zip
+  manually OR `git tag <version>; git push --tags` (GitHub Actions -> Thunderstore; token
+  lives ONLY in the repo's Actions secret THUNDERSTORE_TOKEN).
+- Thunderstore rejects duplicate version numbers. Community slug: `repo`, team: `Revival`.
+- Verbose diagnostics: `[reg] [mode] [held] [snap] [throw] [dedupe] [stats] [hinge]` — note
+  saved configs keep old values; changed defaults only apply to fresh installs.
+- Suspected third-party interference historically: discjenny-CartSpeedSync (removed),
+  GodCommands (untested variable).
+
+## 1.0.6 — velocity-steering, not position-forcing (the vibration lesson)
+
+Symptom: everything vibrating "like a phone at 300%" while synced (packets healthy, no
+errors). Cause: TickShadow ran MovePosition + velocity writes on DYNAMIC rigidbodies every
+physics tick. MovePosition on a dynamic body teleports it each step, fighting its own
+physics integration 50x/s, while the blend target itself resets with every packet
+(lead = hostVel * packetAge sawtooths) and with Photon clock noise in the lag estimate.
+Their RateSmoothing=1 config experiment did the same to the Hermite rate estimate for
+non-registered objects (enemies/players) — every measured interval REPLACED the estimate.
+
+Fix (the rule to keep): corrections steer VELOCITY (fold position error into the velocity
+target: desiredVel = targetVel + clamp(posErr * gain)), with a 2cm/1° deadband so settled
+objects never chase packet noise. Position forcing (MovePosition lerp) only for >1.5m
+divergence (convergence guarantee) and host-kinematic objects. Held drift corrections are
+acceleration nudges (velocity += clamp(err,3) * 2.5 * dt). Lag estimate clamped to 0.3s.
+Post-throw: velocity blend drops to 0.08/tick or it would yank predicted throws toward
+stale host velocity.
+
+## 1.1.0 - weapon straightening + convergence, stable release
+
+Held weapons stayed sideways for clients: item scripts call PhysGrabObject.TurnXYZ
+(orientation targets) behind IsMasterClientOrSingleplayer gates. The torque APPLICATION
+already ran locally (PhysGrabObject.FixedUpdate is transpiled) - only the target-setting
+calls were gated out. Fix: transpile ItemGun.UpdateMaster + ItemMelee.FixedUpdate +
+ItemMelee.TurnWeapon (orientation/override-only methods - verified in decomp that
+shooting/misfire/battery/damage all live in separately-gated methods that stay host-only).
+Ten other gadget classes call TurnXYZ with per-class structures; instead of transpiling
+them all, held items without ItemGun/ItemMelee mirror the HOST's rotation while held
+(mirrorHeldRot, slerp 0.12/tick, 2-degree deadband, skipped while heldHostIdle) - the host
+runs their scripts on our behalf, so its rotation IS the straightened answer.
+
+Convergence: removed the far-branch MovePosition entirely (jiggle source); one
+distance-scaled velocity law now covers all divergences: gain = a*25*(1+2*errMag),
+correction clamped 10 m/s. Multi-meter gaps close in ~0.4s, smoothly. Position writes on
+dynamic bodies remain ONLY in Snap() and the host-kinematic branch (correct usage).
+
+## 1.1.1 - the weapon-orientation lesson (do NOT transpile item scripts)
+
+1.1.0 shipped two approaches side by side and the playtest was a perfect A/B:
+- ItemGun/ItemMelee orientation methods transpiled to run locally -> violent vibration
+  ("fighting with the host" feel, but it is actually fighting the CLIENT-side grab
+  physics; plain-loot torque is weak so the same fight is invisible on valuables,
+  weapon torque overrides are strong: OverrideTorqueStrength(2)+AngularDrag(20)).
+- Everything else mirroring the HOST rotation while held (slerp 0.12, 2deg deadband,
+  skip when heldHostIdle) -> perfectly fine.
+Conclusion: mirror rotation for ALL held items; never run item orientation scripts
+locally. The transpiler TargetMethods has a NOTE.
+
+Throws: post-throw grace must be PURE local physics (early return before target math in
+TickShadow, after teleport handling). Any correction during the grace drags the flight
+toward stale "still in your hand" host data, and the host-kinematic branch could force
+a fresh throw kinematic. Softened-blend variants (a*0.3, velBlend 0.08) were still too
+strong once corrections became distance-scaled.
+
+## 1.1.2 - what the original NetworkingReworked (0.2.2, readthisifbad) actually did
+
+Decompiled it properly (scratchpad nr-decomp, regenerable: Thunderstore
+readthisifbad/NetworkingReworked + ilspycmd). Techniques adopted with credit:
+
+1. RELEASE: SyncAfterRelease/OverwriteStoredNetworkData rewrites the PTV network state to
+   the local rb state at release -> no stale in-hand reference. Ours: EndLocalGrab seeds
+   st.host* from rb + lastPacketTime=now. (They went further: DelayedReleasePatch skips
+   GrabEnded, performs it locally, keeps streaming beam data so the HOST releases from the
+   right spot - PreventPhysGrabBeamDeactivatePre. Not adopted; RPC-shape risky post-security-update.)
+2. DOORS: full local reimplementation of PhysGrabHinge.FixedUpdate on clients, NO continuous
+   rotation sync; their clients SENT OpenImpulseRPC/CloseImpulseRPC to everyone (would likely
+   trip modern SemiFunc.MasterOnlyRPC guards - the game's own CloseImpulseRPC now checks it).
+   Ours: local motion owns the door; follow host only when host moves and we rest.
+3. THEY NEVER SIMULATED TOOLS: BlockedItems = ItemBattery/ItemGun/ItemRubberDuck/
+   ItemGrenade*/ItemDrone*/ItemUpgrade* + enemies + tumbled players + hinges(from ownership).
+   Their tools were vanilla-laggy but stable. We simulate them with position-local +
+   host-rotation mirror via ANGULAR VELOCITY steering (never MoveRotation - fights grab torque).
+4. Their ownership core: PhotonView.IsMine postfixed to true for simulated views + transpilers
+   rewrote even isMaster FIELD READS to photonView.IsMine (OverrideTimersTick transpiler).
+5. Melee swings: ItemMelee.OnPhotonSerializeView prefix consumes isSwinging stream and calls
+   ActivateHitbox() on swing start - the answer if melee hits ever feel wrong for clients.
+6. Their passive sync = raw rb.position/rotation/velocity lerps at 0.075, gated off while
+   locally grabbed or riding a held cart; release used staged coroutine re-sync (SlowSyncCartRoutine).
+
+### Correction to point 5 above (checked, do not re-chase)
+The melee swing patch CANNOT and NEED NOT be ported: ItemMelee.OnPhotonSerializeView and
+the isSwinging field no longer exist in the current game. Melee swings are now synced via
+StateSetRPC (host -> RpcTarget.All, MasterOnlyRPC-guarded); StateSwinging calls
+ActivateHitbox() from the UNGATED Update() half, i.e. hitboxes already activate on every
+client natively. If melee hits ever feel wrong for clients, the suspect is hitbox POSITION
+(host sees the weapon trailing our hand by ~ping), not activation.
+
+## 1.1.6 - held-object orientation: retarget the controller, never steer the body
+
+Four versions of tool-straightening attempts, one root cause found in the decomp
+(PhysGrabber beam update, ~line 1981): while an object is held, the grabber RE-CAPTURES
+cameraRelativeGrabbedForward/Up from the object CURRENT rotation every frame (when
+physRotatingTimer <= 0). Consequences:
+1. By default nothing straightens a held object - the orientation target follows the
+   object, so the grab torque is orientation-neutral. Item scripts create real targets
+   by overwriting these vectors every Update via TurnXYZ.
+2. Any outside write to rb.rotation/angularVelocity gets neutralized or stomped by the
+   grab manipulation running in the same tick - MoveRotation slerp (buzz), angVel
+   steering (weak), angVel + torque overrides (still weak) all failed identically.
+THE way to control held orientation: write grabber.cameraRelativeGrabbedForward/Up
+(camera-relative: cam.InverseTransformDirection(targetRot * Vector3.forward/up), cam =
+playerAvatar.localCamera.GetOverrideTransform()) every FRAME (frame-rate beats the
+frame-rate recapture; tick-rate alone loses whole frames). Respect grabber.isRotating.
+
+### 1.1.7 addendum to the orientation lesson
+The complete held-orientation recipe is THREE parts (all from the game's own weapon code):
+1. target: grabber.cameraRelativeGrabbedForward/Up = cam.InverseTransformDirection(rot * fwd/up)
+2. strength: pgo.OverrideTorqueStrength(2f) sustained - base torque is scaled 15*dt (gentle)
+3. damping: pgo.OverrideAngularDrag(20f) sustained - kills the flop
+Target without strength+damping = floppy (1.1.6). Steering the rigidbody at all = stomped (1.1.2-1.1.4).
+
+### 1.1.8 final orientation architecture + vehicles
+- Weapons (ItemGun/ItemMelee): hold orientation computed LOCALLY per frame+tick from
+  their own public tuning fields (gun: aimVerticalOffset; melee: forwardTilt/
+  orientationOffset/turnWeapon/currentYRotation via FieldRef) -> pgo.TurnXYZ + the item
+  type-appropriate strength (gun 2/drag 20, melee 0.4/drag 5). Zero network in the
+  rotation loop. Mirroring the HOST rotation at full strength telegraphs the 10Hz,
+  ping-late packet steps = "glitchy" (1.1.7 lesson). Gentle mirror stays for gadget
+  types we do not know fields for.
+- Drivable vehicles (ItemVehicle, e.g. Semiscooter) are EXCLUDED from simulation
+  entirely - they have their own drive physics/networking; syncing them while the local
+  player drives makes them undrivable. Old-mod philosophy: block what has complex logic.
+
+## 1.1.9 - the item policy, settled (NR was right)
+
+Weapons and powered gadgets are NEVER simulated. Full NR blocklist adopted: ItemVehicle,
+ItemBattery (covers guns/melee/staffs/toggles), ItemGun, ItemMelee, plus name-prefix
+ItemGrenade*/ItemDrone*/ItemUpgrade*/ItemMine*/ItemRubberDuck*. They are vanilla:
+host-driven, correct orientation/behavior, small hand lag. Only simple carryables
+(health packs etc.) get instant-feel simulation. The whole 1.1.0-1.1.8 orientation saga
+existed because we owned objects whose per-type scripts fight generic ownership - NR
+knew this in 0.2.x. The gun/melee local-orientation code paths remain in
+ApplyHeldOrientation but are unreachable (blocked types never register); kept as
+reference with this note.
+
+## 1.2.0 - item policy final form: "the client controls what it touches"
+
+1.1.9 (full NR blocklist) was stable but made every actively-used tool feel host-laggy -
+the user immediately wanted singleplayer feel back. Settled policy:
+- SIMULATED with local orientation: guns (aimVerticalOffset), melee (forwardTilt/
+  orientationOffset/currentYRotation) - the 1.1.8 architecture, which was the correct
+  design all along (no network in the rotation loop); it just never got a clean test
+  before the blocklist pivot.
+- SIMULATED with gentle host mirror: other gadgets (staffs, trackers, health packs...).
+- VANILLA (blocked): only AUTONOMOUS objects - things that move THEMSELVES rather than
+  being moved: ItemVehicle, ItemDrone*, ItemRubberDuck*. This is the principled line:
+  ownership belongs to whoever provides the motion. Player provides motion -> client
+  owns. Object provides motion -> host owns.
+
+## 1.2.1 - throw follow + doors exempt from throw handling
+
+- Mid-air "catching its breath" root cause: the host copy of a moving object trails by
+  one-way ping; our lead only compensated packetAge. Fix: lead = min(packetAge +
+  oneWayPing, 0.35), oneWayPing = PhotonNetwork.GetPing()*0.0005 refreshed per tick.
+  Plus postThrowRamp (0.4s): after the throw grace, correction gain fades in from 0 -
+  the object FOLLOWS host velocity first, converges second. Snap-distance check skipped
+  while ramping (a hard throw diverging early must glide, not teleport).
+- Hinges are exempt from the entire throw pipeline (no LocalThrow, no postThrow grace,
+  no host-cache seeding on release): seeding masked the host TRUE door rotation - shop
+  doors reconciled toward the player lie instead of the host locked/closed state.
+
+## 1.2.3 - the door-sync rule, final form
+
+"Local motion owns the door" (1.1.2) was too broad: the game AUTO-CLOSE spring runs
+locally (authority transpiler) and its motion also gated out syncing - open cupboards
+quietly self-closed on clients (desync). Final rule: HOST ANGLE IS CONTINUOUSLY
+AUTHORITATIVE for hinges; only OUR interactions interrupt it - localPushTimer (contact
+pushes), hingeSyncPause 1.5s on grab release / 1s trailing a push, and during the pause
+only while still actually swinging (angVel gate INSIDE the pause window only). The
+door spring may never out-vote the host.
+
+## 1.2.5 - held-object snap discipline + session log archive
+
+First real 4-player lobby ran ~10x the packet traffic of any test (2300+/10s); held-cart
+trails legitimately hit 3.8m at sprint. Consequences fixed:
+- Held wedge-snap ("freeing to host position") false-positived on a paused cart with a
+  normal trail -> cart teleported OUT OF THE PLAYER HAND. Rule: never wedge-snap a held
+  cart (velocity-driven, converges by itself; ForceHandback is the real safety); other
+  held items need drift>2.5m AND speed<0.5 for 1.5s.
+- Cart handback threshold x1.5 and 1.2s dwell (busy-lobby headroom).
+- ArchiveSessionLog: BepInEx truncates LogOutput.log every launch and wiped a bug
+  session once. Plugin copies the live log to BepInEx/RevivalSync-logs/session-*.log
+  every 60s + on OnDestroy, keeps newest 10. File.Copy works while BepInEx holds the
+  file (FileShare.Read).
+
+## 1.2.7 - drone handoff + the all-switches-off incident
+
+- July 18 sessions ("doors are shit again + insane desync"): the log archive earned its
+  keep immediately - headers showed SmoothSync: False, and the config had ALL FOUR main
+  switches off (user testing toggles). Most of the report was vanilla behavior. Rule for
+  future triage: CHECK THE LOADED-LINE + CONFIG STATE FIRST before hunting regressions.
+- Feather/magnet drones: drone applies OverrideMass(0.5)/OverrideZeroGravity/drag to its
+  magnetTargetPhysGrabObject HOST-SIDE only -> our full-weight local sim vs floating host
+  copy = "immovable object". Fix: droneExempt state - while any ItemDrone with
+  magnetActive targets a registered pgo (fields internal, FieldRefAccess, synced to
+  clients via RPCs), that object reverts to vanilla sync (IsSuppressed/IsRegistered/
+  HasPhysicsAuthority all false, StartLocalGrab refuses, Restore() seeds PTV on
+  transition). Consistent with the ownership rule: the DRONE provides the motion.
+
+## 1.2.8 - drone flap root cause + resync key + convergence backstop
+
+- 1.2.7 drone exemption looped 969x on one piano: (a) Restore() ends in HardRemove -
+  it UNREGISTERS (know your own primitives!); exempt-enter removed the state, sweep
+  re-registered, fresh state exempted again. Split: SeedPtvFields (fields only) vs
+  Restore (seed + remove). (b) Deeper design bug: exempting a LOCALLY HELD object
+  fights the player grab (feather drone = help the player carry). Rule: player grab
+  wins; while held + feather-targeted, replicate the drone target physics locally
+  (OverrideMass 0.5 / Drag 1 / AngularDrag 5 per ItemDroneFeather); drone-only ->
+  vanilla handoff.
+- ResyncAll (NR HardSync for everything, credited) on configurable key (default F8).
+- Convergence backstop in TickShadow: >1.5m from target for >5s -> Snap. Promise:
+  loot always ends up where the host sees it.
+- UnityEngine.Input needs UnityEngine.InputLegacyModule reference (type-forwarded).
+
+## 1.2.9 - the override gate + bounded cargo (113 F8 presses of evidence)
+
+- PhysGrabObject.OverrideTimersTick has an INTERNAL master gate (line ~617) right before
+  OverrideVariousTick/OverrideStrengthTick/mass consumption: EVERY Override* call on a
+  client has been a silent no-op this whole time (feather mass, tool torque/drag boosts,
+  hinge drag). NR transpiled exactly this method - now understood WHY, and adopted
+  (CartAuthorityPatch target). Lesson: when replicating game behavior locally, verify
+  the CONSUMING code path runs client-side, not just the setter.
+- Cart cargo (ridingTick) had NO safety net: exempt from blends, backstop, wedge, snap.
+  Busy lobby = carts always in use = most loot permanently exempt = unbounded drift =
+  "insane desync", and the 5s backstop could never fire for exactly the objects that
+  needed it. Riders now Snap at >3m from hostPos (bounded riding).
+- Auto Resync Seconds config (0=off): automated ResyncAll for players who want it.
+
+## 1.2.10 - the inside-the-tolerance desyncs
+
+Log pattern to remember: cargo-stray fired 1x, backstop 0x, yet the player saw stuck
+loot everywhere -> the desync lived INSIDE the tolerances:
+- Riding cargo (pure local): bumps ejected loot locally to lie BESIDE the cart, under
+  the 3m bound, uncorrected forever. Fix: gentle keep-in-basket velocity pull beyond
+  0.3m (gain 2/s cap 2m/s blend 0.3), snap at 2m.
+- rb.IsSleeping() early-return in rest-settle let objects that fell asleep in the WRONG
+  place sleep forever, immune to every correction. Fix: only skip when within 0.5m of
+  hostPos; otherwise WakeUp and glide home. (Sleep = the great correction-bypass.)
+- Drones: blanket blocklist made CARRIED drones vanilla-laggy (the old shop-item lag).
+  Now registered like items; dynamically droneExempt while toggleState on (deployed,
+  flies itself) or while magnet-carrying. ItemToggle.toggleState is public.
+
+## OPS GOTCHA - verify the profile DLL version after every deploy
+update-package.ps1 reports "local profile updated" even when the copy is blocked by the
+GAME HOLDING THE DLL LOCK. 1.2.10 sat un-deployed for a full cycle (profile stuck on
+1.2.9) while I thought fixes were live - the user replayed the SAME 1.2.9 session 3x.
+ALWAYS confirm after building while a session may be open:
+  [Diagnostics.FileVersionInfo]::GetVersionInfo("<profile>\Revival-RevivalSync\RevivalSync.dll").ProductVersion
+and cross-check the log's "RevivalSync X.Y.Z loaded" line against the version you expect
+BEFORE diagnosing "it is still broken". Same-version + same-log = not tested yet.
+
+## 1.2.11 - CARGO MUST BE CORRECTED IN THE CART FRAME, NEVER IN WORLD SPACE
+
+First real 1.2.10 log. Cart cargo never snapped/strayed (bounds looked fine) yet loot
+"stuck out and fell out, like it is slippery". Cause was my own 1.2.10 keep-in-basket
+pull: it pulled cargo toward st.hostPos (WORLD). The host copy of a moving cart trails
+ours by one-way ping, so its cargo positions trail too - the pull therefore shoved every
+item BACKWARD relative to the basket, every tick, ejecting it over the rim. More speed =
+more ejection.
+RULE: an object carried by another object is only meaningfully "in the right place"
+RELATIVE TO ITS CARRIER. Correct in the carrier frame:
+  hostLocal = Inverse(cart.hostRot) * (rider.hostPos - cart.hostPos)
+  want      = cart.rb.position + cart.rb.rotation * hostLocal
+Lag cancels out entirely. >1.5m err = place it back (with cart velocity, not zero);
+>0.15m = soft velocity settle (6/s, cap 4, *dt). SimState.ridingCart holds the carrier.
+Same rule will apply to any future carrier (conveyors, vehicles, players).
+
+Also: host sets the PTV teleport flag continuously on some objects (death heads: 3710
+snaps in one session, 1096 at dist<0.05m). Ignore teleport flags when we are already
+within 0.1m - pure spam + needless physics writes.
+
+## 1.2.12 - cargo: stop correcting it (NR was right), and the pooling trap
+
+CART CARGO, SETTLED. Three generations of correction all failed differently:
+  1.2.4  blend toward host       -> rattle/vibration
+  1.2.10 world-space pull        -> shoved loot backwards out of the basket (host cart
+                                    trails by ping, so its cargo does too) = "slippery"
+  1.2.11 cart-frame pull         -> fights the basket own colliders, still annoying
+NR did NONE of it: ApplyPassiveSync skips entirely when (IsItemInCart && CartIsBeingHeld).
+Cargo rides local physics in a local basket with local collisions - the basket holds the
+loot, the network does not have to. Reconcile only when the haul ends (NR:
+SlowSyncCartRoutine, cart first then items staggered 0.02s at 80% duration; ours: correction
+ramp 0.5s + (n&7)*0.05 stagger). RULE: do not network-correct an object that is resting
+inside another simulated object.
+
+POOLING TRAP: AssetManager.physDisabledPosition = (0,3000,0). The game parks deactivated
+objects there and the host STREAMS that position. Blending toward it flings our copy
+skyward -> "beyond snap distance" -> snap back -> repeat (272x on scenery in one session,
+same few decoration valuables). Guard: skip sync when hostPos is within 5m of the parked
+position. Watch for this class: host positions that are not real gameplay positions.
+
+## 1.2.13 - passive sync reverted to NetworkingReworked's four lines
+
+TickShadow correction had grown to ~80 lines / 8 interacting mechanisms. NR's entire
+passive sync (FakeOwnershipController.ApplyPassiveSync) is:
+    rb.position        = Lerp (rb.position,        state.position,        0.075)
+    rb.rotation        = Slerp(rb.rotation,        state.rotation,        0.075)
+    rb.velocity        = Lerp (rb.velocity,        state.velocity,        0.075)
+    rb.angularVelocity = Lerp (rb.angularVelocity, state.angularVelocity, 0.075)
+...guarded only by !locallyGrabbed && (!inCart || !cartHeld). That is all of it.
+
+WHY OURS KEPT FAILING: every refinement (ping+age extrapolation, hostIdle, deadbands,
+error-scaled velocity steering, corrCap, wedge timers) made the TARGET MOVE BETWEEN
+PACKETS. A moving target + per-tick correction = the fight that showed up as vibration,
+"weak" holds, slippery cargo, mid-air braking. NR's target is stationary between packets,
+so a plain lerp is an exponential decay: smooth, convergent, unable to fight physics.
+Also reverted CacheHostState to store the RAW streamed position (NR read the direction
+slot and ignored it) - the dir*lag lead was the same moving-target bug at the source.
+
+KEPT deliberately (not in NR, earned here): pooled/parked-object guard (y=3000),
+HostStalled guard, hostKinematic follow, hinge system, throw grace + ramp, cargo riding,
+snap distance, 5s convergence backstop, F8 ResyncAll.
+RULE GOING FORWARD: if a fix requires the sync target to move, it is the wrong fix.
+
+## 1.2.14 - held objects go NR-simple too; full NR audit
+
+NR held rule: ApplyPassiveSync is skipped entirely when locally grabbed. NO corrections.
+Ours had a drift nudge (fought the natural ping-trail = the "ultra slow cart" brake) and
+a wedge-snap (mistook a paused cart trail for stuck = "cart teleported out of my hand").
+Both removed. Kept ONE last resort: ForceHandback when drift > HandbackAt for >0.6s
+(1.2s carts) - NR had nothing, but without it a snagged host copy leaves you holding a
+ghost forever. Config "Held Object Correct At" deleted (dead).
+
+### AUDIT: where we are vs NR, and why we do NOT copy the rest
+ALREADY NR (verbatim or equivalent): passive sync (1.2.13), cargo rule (1.2.12), held
+rule (1.2.14), release state-overwrite, door local-logic model, cart transpilers,
+OverrideTimersTick transpile, autonomous-object blocking.
+DELIBERATELY NOT NR - copying these would REGRESS the mod on the current game:
+ - Capture: NR used fixed offsets (data.Length==15, offset 7). THE GAME UPDATE CHANGED
+   THE PAYLOAD - this is precisely why NR is dead. Ours pattern-scans and survives.
+ - Hinge impulse RPCs: NR had CLIENTS broadcast OpenImpulseRPC/CloseImpulseRPC to All.
+   Modern equivalents are SemiFunc.MasterOnlyRPC-guarded; a client broadcast is rejected
+   and is exactly the shape the security update targets.
+ - PhotonView.IsMine postfix -> true: flips RPC targeting and serialization DIRECTION,
+   not just physics authority. Ours flips PhysGrabObject.isMaster + targeted transpiles.
+ - DelayedRelease beam replay (skip GrabEnded, replay beam state, client-dispatched
+   GrabEndedRPC/PhysGrabBeamDeactivateRPC): same RPC-shape risk.
+NETWORKTWEAKS VERDICT: the whole "tweaks" half is 3 lines and ZERO patches
+(DisconnectTimeout=3600000, SentCountAllowance=10000, MinimalTimeScaleToDispatchInFixed
+Update=Inf). Keep - free, no conflict surface, prevents random lag-spike kicks.
+Smoothing.cs (325 lines, Hermite for non-simulated objects) is the only optional bulk;
+NR had no equivalent (it replaced PhotonTransformView.Update wholesale instead).
+
+## 1.2.15 - the cart cluster: local cart logic is held-only
+
+Log state: 25 snaps/session (vs 3714 four days ago) - core NR sync is holding. The
+remaining complaints were all cart:
+- 90-degrees-off cart: MasterOrLocallySimulated let PhysGrabCart.FixedUpdate (stabilize/
+  state/steer) run for EVERY registered cart. For a shadowed cart that local logic
+  fights the passive rotation slerp indefinitely; and the backstop measured only
+  DISTANCE, so a right-place-wrong-angle cart was never rescued. Fixes: (a) wrapper
+  returns false for PhysGrabCart contexts unless locally grabbed; (b) backstop triggers
+  on dist>1.5m OR rotErr>30deg (resets <0.75m AND <10deg).
+- Loot slides off: riding condition (velocity threshold) flapped at stop-start; every
+  riding<->synced transition jostled the load. rideHoldTimer 1.5s hysteresis on the
+  CART state keeps riders marked through pauses.
+- Host loads loot into unsynced cart -> sticks OUTSIDE the basket: host cargo spots land
+  outside our misrotated basket; downstream of the rotation fix.
+RULE (generalizes 1.2.12's): run the game's per-object master logic locally ONLY for
+objects the player is actually holding; for shadowed objects it fights the sync.
+
+## 1.2.16 - the upgrade thief: stale playerGrabbing entries
+
+Player report: hit someone with an upgrade orb, they use it later (or do anything),
+and the upgrade lands on the REPORTER. Root cause chain (all vanilla facts verified in
+decomp):
+- Upgrades apply to PlayerAvatarGetFromPhotonID(ItemToggle.playerTogglePhotonID); that
+  ID comes from whichever CLIENT fired ToggleItem, and ItemToggle.Update fires it when
+  physGrabObject.heldByLocalPlayer && InputDown(Interact). So attribution is decided by
+  a client-side "am I holding this" flag plus the E key.
+- heldByLocalPlayer is recomputed every FixedUpdate purely from the playerGrabbing
+  list (any entry with photonView.IsMine).
+- Our GrabStartedPatch adds the local grabber to playerGrabbing instantly (and the
+  dedupe patch suppresses the host's add broadcast), but GrabEndedPatch removed it ONLY
+  when IsLocalGrab was still true. An UNSEEN release (orb knocked from hand by hitting
+  a player, tumble, death) makes TickHeld self-heal localGrab=false first; the later
+  GrabEnded then early-returned and the entry was NEVER removed by us.
+- Vanilla's janitor (PhysGrabObject.Update) drops entries only when the grabber's
+  GLOBAL grabbed flag is false - and you are almost always holding SOMETHING - so the
+  stale entry survived. Result: every local E press toggled that orb from anywhere on
+  the map with OUR photon ID; it popped in the other player's hands credited to us.
+  ("They use it and I get it" was actually keyed to OUR E presses - E is pressed while
+  holding an item, which is exactly when the janitor cannot clean.)
+Fix, three layers:
+1. GrabEndedPatch removes our entry UNCONDITIONALLY (before the IsLocalGrab return).
+2. EndLocalGrab calls ScrubStaleLocalGrabber (covers the unseen-release self-heal).
+3. Tick calls the scrub for every non-localGrab state (safety net; genuine grabs have
+   localGrab set synchronously by the GrabStarted postfix, so no false positives).
+Scrub condition: local entry whose grabber is not (grabbed && grabbedPhysGrabObject ==
+this). Verbose log tag: [stale-grab] - its presence in a session log CONFIRMS this
+mechanism fired.
+RULE: any list WE insert into, WE must remove from on every exit path - vanilla
+cleanup loops are written for vanilla insertion patterns and will not cover ours.
+
+## 1.2.17 - upgrade attribution: stay out of it (1.2.16 was the wrong call)
+
+User pushback on 1.2.16: "that was not what was happening bro i kept holding it".
+They were right. Evidence gathered AFTER shipping 1.2.16 (do this first next time):
+- Grab/release counts on Item Upgrade* across all 10 archived sessions: perfectly
+  balanced (0/0, 1/1, 8/8, 7/7, 11/11, 24/24, 2/2, 23/23), zero handbacks. NOTE: this
+  is NOT proof on its own - EndLocalGrab logs "Released grab authority" on the unseen-
+  release self-heal path too, so balanced counts cannot rule a stale entry in or out.
+- The real killer for the 1.2.16 theory: a stale local entry is SELF-CORRECTING.
+  Vanilla GrabEndedRPC runs on the master, and if the master's list contains us it
+  broadcasts GrabPlayerRemoveRPC to All - which cleans our local list within one round
+  trip. We never suppress that RPC (dedupe only patches GrabPlayerAddRPC). So a
+  PERSISTENT stale entry is close to impossible. 1.2.16 is defensible hygiene, not
+  the bug. Keep it, do not claim it fixes upgrades.
+ACTUAL MECHANISM (vanilla, verified in decomp):
+- ItemToggle.Update fires on ANY client where physGrabObject.heldByLocalPlayer is true
+  and Interact goes down. It sends ToggleItemRPC(toggle, SemiFunc.PhotonViewIDPlayer
+  AvatarLocal()) to ALL. ToggleItemRPC has NO MasterOnlyRPC guard.
+- ToggleItemLogic stores that id in playerTogglePhotonID; ItemUpgrade.PlayerUpgrade and
+  every ItemUpgrade* subclass resolve the recipient from it
+  (PunManager.Upgrade*(PlayerGetSteamID(PlayerAvatarGetFromPhotonID(id)))). PunManager's
+  Upgrade* methods are plain local mutations of statsManager dictionaries - no master
+  gate anywhere. Whoever's client fires FIRST owns the upgrade, permanently.
+- heldByLocalPlayer is recomputed each PhysGrabObject.FixedUpdate from playerGrabbing
+  (any entry with photonView.IsMine). Checked: no master-gated early return precedes
+  that block, so our FixedUpdate transpile does NOT corrupt it.
+- OUR effect: the instant-grab patch sets that flag with ZERO host round trip, while an
+  unmodded player must wait for master GrabStartedRPC -> GrabPlayerAddRPC. On a
+  CONTESTED orb (two players grabbing at it - exactly what handing one over looks like)
+  the modded client wins the race every time and takes the upgrade.
+FIX: CanSimulate returns false for ItemUpgrade (GetComponentInParent). Orbs are held at
+the face via OverrideGrabDistance(0.5f) and need no instant physics, so there is nothing
+to lose. Attribution reverts to pure vanilla.
+DIAGNOSTICS added (verbose): [upgrade] on ItemToggle.ToggleItem (this client is claiming
+it + SimManager.DescribeGrabState) and on ItemUpgrade.PlayerUpgrade (who the credit
+landed on). If it recurs with these silent on our side, it is vanilla, not us.
+RULE: never take local authority over an object whose game logic assigns PERMANENT,
+attributable rewards from a client-side "who is holding this" check. Latency advantage
+IS a behaviour change even when the physics are perfect.
+OPS: do not bulk-edit source with PowerShell (Get-Content|-replace|Set-Content) - PS 5.1
+Get-Content reads UTF-8 as ANSI and the round trip mangles every em dash. Caught it via
+git diff --numstat showing 7 changed lines for a 1-line version bump. Use the Edit tool.
+
+## 1.2.18 - full audit pass
+
+Read every source file end to end (SimManager 1560, Patches 433, Plugin 307,
+Smoothing 361) plus the build/publish scripts. Findings:
+1. CRITICAL (self-inflicted, 1.2.17): ToggleClaimLogPatch and UpgradeCreditLogPatch were
+   written but NEVER added to Plugin.patchTypes. harmony.PatchAll(Type) is called per
+   entry of that array, so both diagnostics were dead code - they would have recorded
+   nothing and the next log would have "proved" the wrong thing. FIXED.
+   RULE: adding a patch class is TWO steps in this codebase - write it, then register it
+   in patchTypes. Grep patchTypes against the [HarmonyPatch] classes after every add.
+2. Diagnostics could throw into game code (SemiFunc.PhotonViewIDPlayerAvatarLocal
+   dereferences PlayerAvatar.instance, null outside gameplay). Both wrapped in try/catch
+   plus an explicit instance null check. A logger must never be able to break a frame.
+3. .github/workflows/publish.yml carried the ORIGINAL Thunderstore description
+   ("[HIGHLY EXPERIMENTAL - expect game-breaking bugs]"), contradicting manifest.json.
+   A tag push would have published that text over the current one. Synced, with a
+   comment tying the two together.
+4. README did not document the F8 emergency resync / Auto Resync Seconds at all. Added.
+Verified clean, no change needed: no token in any tracked file (git grep tss_);
+.gitignore covers bin/obj, LocalPaths.props, *token*, reference/; ScrubStaleLocalGrabber
+correctly SKIPS the handback case (grabber genuinely holding -> g.grabbed &&
+grabbedPhysGrabObject == pgo) so it cannot strip a real grab; Tick iterates tickBuffer
+(a snapshot) so Restore/HardRemove mutating states mid-loop is safe; SweepDead/
+Smoothing.Sweep only ever hold Unity fake-null keys, never real nulls, so Remove cannot
+throw; TransformViewSerializePatch and Smoothing.SerializePatch agree on __runOriginal
+so the stream is never double-consumed; the cart guard in MasterOrLocallySimulated only
+matches PhysGrabCart contexts, leaving PhysGrabObject.FixedUpdate/OverrideTimersTick
+authority intact for shadowed carts as intended.
+
+## 1.2.19 - resync key: string instead of KeyCode enum + second audit pass
+
+User: changing the F8 resync key means scrolling a horrible list. Confirmed - their
+config already showed "Resync Loot Key = F4", and REPOConfig renders a ConfigEntry
+<KeyCode> (enum) as a REPOSlider stepping through all ~350 KeyCode names. A
+ConfigEntry<string> renders as a typed REPOInputField instead (verified in the
+decompiled REPOConfig ConfigMenu.cs: string -> CreateREPOInputField, enum ->
+CreateREPOSlider over Enum.GetNames).
+FIX: ResyncKey is now ConfigEntry<string> (default "F8"). Plugin.ResyncKeyCode parses
+it once and caches until the text changes; KeyCode.None disables. ParseKey uses
+Enum.TryParse (case-insensitive, covers every real KeyCode name incl. Mouse0-6,
+Keypad*, F1-24) then a small alias table (spacebar, esc, ctrl, a bare digit -> Alpha#,
+off/disabled -> None). MIGRATION: the old enum serialized as its name ("F4"), which is a
+valid string, so existing bindings survive the type change untouched; BepInEx just
+rewrites the type metadata and drops the acceptable-values list on next launch.
+SELF-BUG caught in review: my first draft aliased "mouse3"/"mouse4"/"mouse5" to
+Mouse2/Mouse3/Mouse4. Those are all valid KeyCode names, so Enum.TryParse matches them
+FIRST - the aliases were unreachable AND remapped the number wrongly (Unity Mouse3 = a
+side button, not middle). Removed; kept only non-enum spellings (middlemouse ->
+Mouse2). RULE: before adding a case-insensitive alias, check it is not already a real
+enum name, or the direct parse silently wins.
+SECOND AUDIT (user "check everything again"): re-verified EVERY reflected member against
+the current decompiled game, not just structure. All present with matching type:
+PhysGrabObject.isMaster/isActive/heldByLocalPlayer/spawned/clientNonKinematic,
+ItemToggle.playerTogglePhotonID, PhysGrabber.grabbedPhysGrabObject, PhysGrabCart.
+itemsInCart/inCart/physGrabObjectGrabArea/isSmallCart, PlayerAvatar.isSprinting,
+PhysGrabHinge.broken, ItemMelee.currentYRotation/usesForceRotation/forwardTilt/
+customTorqueStrength, ItemGun.aimVerticalOffset, ItemDrone.magnetActive/
+magnetTargetPhysGrabObject. CartAuthorityPatch targets exist (PhysGrabObject.FixedUpdate
+line 939 / OverrideTimersTick 574, PhysGrabCart.FixedUpdate 263/CartSteer 313,
+PhysGrabHinge.FixedUpdate 185, PhysGrabObjectGrabArea.Update 87). Override* signatures
+match. ResyncKey was the ONLY enum config entry, so it was the sole scrolling-menu
+offender; all other entries are bool/float (toggles/sliders).
+NOTE (not changed): ItemHealthPack uses the SAME playerTogglePhotonID attribution as
+upgrades, so in theory a contested health pack could heal the racer who grabbed first.
+Left as-is: consumable not permanent, unreported, and exempting it would make health
+packs feel host-laggy in hand. Documented so it is a known quantity, not a surprise.
+
+## 1.2.20 - the cart trio: it was a config footgun + a mod conflict, not new code
+
+User (on 1.2.19): "cant go up stairs, cart is weak when I hold it + loot sticks to the
+side + sometimes I go through the cart and break everything." Read session-20260722-
+121639.log (1.2.19 confirmed loaded, 0 errors). ROOT CAUSES, both external:
+
+1. TELEPORT DISTANCE SET TO 2.8m (config footgun). The user had lowered "Teleport
+   Distance" (SnapDistance) from the 6m default to 2.8m in some past desync-fighting
+   session. But the log shows a HELD cart naturally drifts up to 2.8m from the host's
+   copy (avg 0.6m, max 2.8m) because we run cart steering locally while the host steers
+   its own copy from network-delayed input - they diverge. So the cart sat right on the
+   teleport threshold. Every brief unheld moment (the log had 61 grab/release cycles -
+   the grab beam flickers on stair geometry) dropped it into TickShadow, saw dist>2.8,
+   and Snapped it to the host copy. On stairs the host copy is lower/behind -> the cart
+   yanks back down = "weak, cant go up." Next to the player -> teleports through them and
+   scatters loot = "go through the cart and break everything" + "loot sticks to the
+   side." One setting, all three symptoms.
+   FIX: raised the AcceptableValueRange floor for Teleport Distance from 2f to 4f and
+   rewrote the description to warn that low = constant cart teleporting. BepInEx clamps
+   the user's 2.8 -> 4 on next launch; recommended 6 in the response.
+   LESSON: a held cart's ~3m local-vs-host drift is INHERENT to local steering (do not
+   try to tether it - that whole class of fix failed in 1.2.11-1.2.14). So any snap/
+   teleport threshold below ~4m is self-inflicted thrash. The floor must sit above the
+   natural drift band.
+
+2. CARTSPEEDSYNC 2.0.0 (discjenny.CartSpeedSync) INSTALLED. It is a Postfix on
+   PhysGrabCart.CartSteer that re-drives cart velocity when the lead grabber is sprinting
+   and clamps angular velocity to 8 (vanilla clamps to 4 - it DOUBLES the turn rate) and
+   pushes cart speed up to the player's raw horizontal speed. Vanilla only ran CartSteer
+   on the host, so on a client CartSpeedSync's postfix never fired. RevivalSync's
+   CartAuthorityPatch now makes CartSteer run LOCALLY for the held cart, so its postfix
+   fires locally on top of our steering every tick -> two steering systems on one cart ->
+   erratic/whippy/loot-flinging. Also partly redundant (we already give instant local
+   cart response). FIX: added a tailored conflict warning (not in the generic replace
+   list - it is a specific CartSteer-postfix conflict; message offers remove-it OR turn
+   off Instant Carts).
+CONFIG ORPHAN NOTE: the user's .cfg still carries dead keys from pre-1.2.14 sections
+(SnapDistance=4.4, PassiveSyncStrength=0.111, "Held Object Correct At"=1.5). These are
+NOT read - current binds use the human section names ("Teleport Distance", "World Sync
+Strength"). Confirmed active values by matching current Config.Bind keys: Teleport
+Distance=2.8, World Sync Strength=0.072, Throw Freedom Seconds=1.25. Do not be fooled by
+the lowercase orphans when reading a user config.
+VERIFIED (ruled out as causes): ObjectsInCart() runs on the client (called from Update,
+no master gate) so itemsInCart IS populated - cargo riding-marking works. Held cart grab
+is healthy (61 grabs / 61 releases, balanced). Only 1 cart snap all session. The 177
+snaps in the log were guns/melee/valuables (host-teleport spam on death heads etc.), not
+the cart - a red herring for this report.
+
+## 1.2.21 - cargo rides WITH the cart; cart turrets are host-driven
+
+Evidence: a third-party bug report with a clean log (Downloads/log.txt) - RevivalSync
+1.2.20, only MenuLib + REPOConfig alongside it, NO CartSpeedSync. 0 mod errors, 14 snaps,
+58/58 balanced grabs, 0 handbacks, 0 resyncs. So the cart-cargo bug reproduces in a clean
+environment and is OURS, not the 1.2.20 conflict, and it happens with NO snap involved.
+
+BUG 1 - "loot goes out of the cart and gets stuck on the side" (chronic since 1.2.10;
+every previous attempt attacked the wrong half of it).
+MECHANISM (finally correct): the NR cargo rule gives objects riding in a cart NO sync -
+right, and not the problem. The problem is the CART is still corrected while they are not,
+and our corrections are direct `rb.position` writes, which are teleports: they ignore
+colliders entirely. So when another player pushes the cart, our basket is lerped (or
+snapped, metres) toward the host pose while the cargo sits in pure local physics - the
+cart passes THROUGH its own load and leaves it outside, wedged on the outer wall. Nothing
+"pushes" the loot out; the basket moves out from under it.
+FIX: CarryCargo(). TickShadow is now a thin wrapper that, for carts only, records pose
+before/after TickShadowInner and applies that exact rigid transform (deltaPos +
+deltaRot about the cart pivot) to every registered item in cartItems(). Skips riders that
+are locally grabbed, drone-exempt, kinematic, or inactive.
+WHY THIS ONE IS DIFFERENT from the 1.2.10-1.2.12 failures: those all gave cargo its own
+moving sync TARGET (world pull, then cart-frame pull) and fought the basket colliders ->
+rattle/slippery. This gives cargo no target at all - it just carries them with their
+container, which is what a basket physically does. It also covers snaps for free: a cart
+that teleports now takes its loot with it instead of leaving a pile behind.
+
+BUG 2 - "laser and cannon go limp in the cart, like no battery pips, only fixed by
+spamming the resync key" (new report).
+MECHANISM: ItemCartCannon and ItemCartLaser BOTH sit on ItemCartCannonMain. Everything
+that holds a turret upright and aims it is master-gated - CorrectorAndLightLogic()
+instantiates the "GreatCorrector" parented to the cart and sets rotationTargetY, all
+inside `if (SemiFunc.IsMasterClientOrSingleplayer() && impactDetector.currentCart)`. A
+client runs NONE of it, so the only thing standing a turret up is the host's streamed
+rotation. Put it in a cart -> our cargo rule withholds exactly that -> it flops. The
+resync key hard-syncs it upright for an instant, hence "only fixed by pressing reset
+continuously" - a perfect fingerprint for "this object has no local logic AND no sync".
+FIX: CanSimulate exempts ItemCartCannonMain (covers cannon + laser). Same class as
+ItemVehicle/drones/duck: host-driven pose, so vanilla PhotonTransformView + Smoothing
+own it. Tradeoff accepted: carrying a turret by hand feels host-laggy, same as a drone.
+RULE (generalizes 1.2.15 and this): before simulating an object, ask what keeps it in its
+pose. If the answer is master-only game logic, a client has nothing to reproduce it with -
+it MUST keep vanilla sync. Withholding sync is only safe for objects whose pose is
+maintained by plain physics.
+NOTE: the reporter's "Q:" was literally "Question:", not the Q key - they asked when
+movement becomes smooth generally. Do not go hunting for a rotate-key bug.
+
+## 1.2.22 - the 1.2.15 rotation backstop was teleporting everything; tumbles never smoothed
+
+Evidence: reporter log2.txt (1.2.21, clean 3-mod profile, 0 errors, 46/46 balanced grabs,
+0 handbacks, 0 resyncs) - 13 snaps, and 7 of them are VALUABLES snapped at dist=0.1, 0.2,
+0.3, 0.6, 0.8, 1.1, 1.3m. Those are objects already in the right place, so the DISTANCE
+arm of the backstop cannot have fired - it was the rotation arm.
+Confirmed by before/after across our own sessions:
+  1.2.14 (pre-rotation-backstop): 25 snaps,  0 close-range "stuck away" snaps
+  1.2.19 (post):                 177 snaps, 52 close-range "stuck away" snaps
+7x more snapping, and a whole class of snap that did not exist before.
+
+BUG 1 - REGRESSION I SHIPPED IN 1.2.15. The rotation-aware backstop (dist > 1.5 || rotErr
+> 30, sustained 5s -> Snap) was written for ONE symptom: a cart parked in the right spot
+but turned 90 degrees. Correct for carts. Applied to every object it is actively harmful -
+a mug/weapon/prop resting at a different angle than the host's copy is NORMAL settling
+(objects come to rest differently on different machines and never converge), so rotErr
+sits above 30 forever and the object is teleported every 5 seconds forever. That is the
+"items pop through shelves / jump out of my hand / land somewhere weird" class.
+FIX: rotationCounts = st.cart != null. Rotation only arms the backstop for carts (and is
+not even computed otherwise). Distance arm unchanged for everything.
+LESSON: when a fix is derived from ONE object type's failure, scope it to that type. The
+1.2.15 entry even says "the cart cluster" and I still applied it globally.
+
+BUG 2 - tumbling players (Q key) never smoothed. Q is InputKey.Tumble, default
+"<Keyboard>/q" (InputManager.cs:191) - the reporter's "jump on Q" is the ragdoll roll, NOT
+"Question:" as read last session. Smoothing.SerializePatch had
+`if (info.Sender != PhotonNetwork.MasterClient) return;`. That is right for physics props
+(host-owned) but a PLAYER's body is owned by that player and streamed directly from them,
+so their tumble never entered the snapshot buffer -> UpdatePatch bailed on
+snapshots.Count == 0 -> raw ~10Hz stepping while everything around it glided.
+FIX: cache the PhotonView in InterpState; accept the stream from master OR from
+view.Owner. Own body is inherently unaffected (we return on stream.IsWriting, and PUN
+never echoes your own serialization back to you), so this only touches REMOTE players.
+
+VALUE LOSS ("ring lost value", "thrown thing hit god knows what and got damaged") -
+INVESTIGATED, NOT FIXED, do not guess at it again without a video:
+PhysGrabObjectImpactDetector.BreakRPC is wrapped in SemiFunc.MasterOnlyRPC, and
+DestroyObject() early-returns unless IsMasterClientOrSingleplayer. So value loss is
+HOST-AUTHORITATIVE - our client-side physics, snaps included, cannot directly damage a
+valuable. What a client CAN do is diverge, and then the host's own copy hits something we
+never see -> "damaged for no reason". Bug 1 made that materially worse (we were teleporting
+loot on a 5s timer), so retest before theorising further.
+
+## 1.2.23 - third full audit
+
+Read every source file again, this time hunting logic bugs in the code changed across
+1.2.21-1.2.22 rather than re-checking structure. One real finding, fixed; everything else
+verified sound.
+
+FINDING (fixed) - CarryCargo double-moved non-riding cargo. As shipped in 1.2.21 it
+applied the cart's correction delta to EVERY registered item in cartItems(). But cargo is
+only left unsynced while it is RIDING (cart in use, plus the 1.5s rideHoldTimer). Once the
+cart parks and that expires, cargo resumes its own passive lerp - and CarryCargo was still
+shoving it by the cart's delta on the same tick. Two corrections per tick pulling different
+ways: the carry pushes it off its own target, its own lerp drags it back. That is exactly
+the tug-of-war the riding rule exists to avoid, i.e. a fresh source of basket rattle.
+FIX: `if (rider.ridingTick != tickCounter) continue;` - carry only what we are deliberately
+not syncing. Parked-cart cargo converges on its own and needs no ride; a parked cart that
+snaps also self-corrects because its cargo is chasing its own host positions anyway.
+NOTE: this refines UNTESTED code (1.2.21's CarryCargo never reached a playtest - log2.txt
+was 1.2.21 but predates the cargo retest). Reasoned, not measured. If basket behaviour is
+still wrong, this restriction is the first thing to re-examine.
+
+VERIFIED SOUND, no change needed:
+- Patch registration: all 14 [HarmonyPatch] classes in Patches.cs appear in
+  Plugin.patchTypes; SerializeReadCapturePatch is the deliberate exception, applied lazily
+  by EnsureCapturePatch once Photon exists. (This is the 1.2.17 bug class - check it every
+  audit; the check is a two-list diff and takes seconds.)
+- CarryCargo ordering is index-independent: riders are marked in the pre-pass before the
+  main loop, so whether a rider is ticked before or after its cart, the riding branch does
+  nothing and only the carry moves it.
+- CarryCargo destroyed-object safety: `item == null` catches Unity fake-null before any
+  FieldRef touches it; `cartState.cart == null` likewise. No throw path into the tick loop.
+- hostKinematic branch uses MovePosition, which does NOT update rb.position synchronously,
+  so the carry delta reads ~0 there. Not a bug (no false movement), just no carry on that
+  path - documented so it is not "rediscovered" as one.
+- Smoothing owner change (1.2.22) cannot touch your own body: the postfix returns on
+  stream.IsWriting, and PUN never echoes your own serialization back to you. Remote only.
+- Rotation backstop now computes rotErr only when rotationCounts (carts) - no wasted
+  Quaternion.Angle per object per tick, and the 0.75m/10deg reset arm is guarded the same way.
+- Version consistency: Plugin.cs / csproj / manifest.json / CHANGELOG top entry all agree.
+  manifest description 246 chars (limit 250) and publish.yml description matches it exactly
+  (the 1.2.18 drift is still closed).
+
+## 2026-07-25 - physics coverage audit (documentation only, no code change)
+
+Swept every networked physics class in the game against what the mod actually does.
+Full writeup lives in docs/PHYSICS-COVERAGE.md - READ THAT before adding anything new to
+the simulation, and before treating a "desync" report as a sync bug (several behaviours
+in it are by design). Headlines:
+
+1. LATENT BUG CLASS, unconfirmed: ~30 self-propelled valuables/items apply their own
+   motion inside a master gate (confirmed by reading ValuablePlane:115, WizardBroom:80,
+   ValuableCubeBall:43/63/84 - gate, then all their forces). Same shape as the cart cannon.
+   It can only bite where the mod WITHHOLDS host data, which is exactly two places:
+   TickHeld (held objects get no network correction) and riding cargo. Predicted symptom:
+   hold a flying broom/plane and it goes dead in your hands while others see it fly.
+   If confirmed, fix with the DRONE pattern (exempt only while active), never a blanket
+   exemption - blanket would make all of them feel host-laggy in hand for nothing.
+   ItemGun/ItemMelee show up in the scan but are already solved via local orientation
+   (1.1.8/1.2.0) and need no change.
+   [2026-11-13: THIS PREDICTION WAS WRONG - none of the three propels itself while held.
+   See the 1.5.3 entry and the rewritten section 4 of PHYSICS-COVERAGE.md.]
+2. PLAYER SIDE: every player action is a host round trip and none of it is predicted -
+   both directions of Q (tumble AND standing back up), tumble force/torque, climb end,
+   falling state. Tumble wings are split: visuals local, LIFT FORCE master-only
+   (ItemUpgradePlayerTumbleWingsLogic:227 gate before the forces at 244/250/254), which is
+   why wings look instant but feel floaty.
+   DECISION: leave it alone. Mispredicting a prop makes a prop jump; mispredicting the
+   PLAYER rubber-bands their own body and camera. The host can also refuse a tumble
+   (stun, tumbleOverride, disabled input), so it needs a rollback path. If ever built:
+   the two Q presses first, behind a config switch, wings second.
+3. CORRECTION TO CARRY FORWARD: tumble launch is NOT fixed and never was. The only
+   tumble change ever shipped is 1.2.22, which smooths OTHER players' tumbling bodies
+   (visual, Smoothing.cs). Do not tell users their own Q delay is addressed.
+
+## 1.2.24 - game v0.5.0 broke the mod; "disabled itself" now means fully off
+
+2026-10-29: REPO v0.5.0 shipped (Photon version string v0.5.0.net3, whole Managed folder
+replaced, Unity 6 - Rigidbody.linearVelocity). RevivalSync 1.2.23 self-disabled at load:
+`PhotonTransformView.m_StoredPosition` no longer exists. It is NOT a rename - the class
+was rewritten:
+- the stream is now ONE packed byte[] per object (SemiNetPackedStream/SemiNetPackedReader:
+  flags byte, ushort teleportRevision, vel, angVel, pos, rot; optional full precision).
+  Our capture patch reads the old multi-value stream and must be rewritten.
+- teleports are now a revision counter (teleportRevision), not just a flag.
+- throttling: idle objects send at divisor 50 with a 2s heartbeat (networkHeartbeatTime),
+  so "host went quiet" no longer means "host is stalled" - HostStalled logic must change.
+- OnSerializeView returns early for non-master senders (player-streamed views).
+- gone: m_StoredPosition, kinematicClientForced (bool). kinematicClientForcedTimer remains.
+Also new: the Plugin component's Update/FixedUpdate now RUN (they never did before, see the
+driver notes). So 1.2.23's "disabled itself" still ran SimDriver.FrameUpdate every frame.
+It was inert (Ready=false gates everything, PhotonReady stays false) but not off. Fix:
+`enabled = false` on both disable paths.
+
+Bug report (user): with RevivalSync on, the private-game password screen stayed greyed out;
+with it off, it worked. Evidence: both session logs are identical through the password
+page (same menu NREs, same steps) and both end AT the page - AsyncLoggers ate the tails, so
+neither log shows what happened after. In the broken session the mod applied zero patches.
+No mechanism found; 1.2.24's fully-off disable is the conservative fix and the next test.
+Other mods in the profile broken by v0.5.0 (any could cause menu trouble): REPOConfig 1.2.6
+(NRE in its MenuPageMain.Start hook, then MenuPageMain.Update NRE every frame), MenuLib 2.5.4
+(MenuSelectableElement.menuID is now a property - field lookup fails), REPO Fidelity 1.7.8
+(UIMousePosRemapPatch fails: SemiFunc.UIMousePosToUIPos gained an overload, while its
+ultrawide mode still shifts buttons ~130px - REPO buttons are grey until hovered, so a
+mouse/visual mismatch looks exactly like "greyed out"), Universal Font Patcher (TMP Awake gone).
+
+## 1.3.0 - port to game v0.5.0
+
+Design: do NOT re-implement the packed format. The game's own OnPhotonSerializeView decodes
+every packet (original always runs now); a postfix copies m_NetworkPosition/Rotation,
+receivedVelocity/AngularVelocity, isSleeping, isKinematic into SimState. A transpiler on
+the same method swaps the decode's Rigidbody/Transform writes (isKinematic, linearVelocity,
+angularVelocity, Sleep, WakeUp, position, rotation) for static filters that drop them for
+the object currently being decoded (SimManager.activeRead, cleared in a Finalizer).
+- First design was "let it write, undo afterwards". Rejected before shipping: the host
+  flags every HELD object kinematic for clients in every packet, so the undo would toggle
+  isKinematic on a held body every packet - velocity loss/stutter. Filter, never undo.
+- "Was a NEW packet applied?" = lastReceiveTimestamp changed (or m_firstTake flipped).
+  NOT lastReceiveData identity - ReceiveChanged copies INTO the existing buffer.
+- Host teleport = receivedTeleportRevision changed. The view's teleport flag also fires on
+  m_Distance > 5 (our copy far off), which is not a host teleport - cleared after reading.
+- First packet (m_firstTake) placement is allowed through (vanilla spawn placement) except
+  for an object we are holding.
+- Drones while flying (droneExempt) keep the full vanilla decode.
+- HostStalled: per-object packets are no longer a liveness signal (repeat packets dropped,
+  far objects on a 2s heartbeat). SerializeReadCapturePatch is now a heartbeat only: ANY
+  host serialization = alive. byViewId/GetByViewId/IsRegistered removed (only fed the old
+  raw scan).
+- GrabPlayerAddRPC now also resets the throttle divisor and fires a Halloween event hook.
+  The dedupe no longer skips the RPC: it removes our early entry and lets the genuine host
+  broadcast (sender == master only) re-add it once.
+- Smoothing: m_Direction gone -> hinge velocity from receivedPosition - prevPosition (what
+  m_Direction was). Owner-stream acceptance (1.2.22) removed - vanilla drops non-host
+  packets before decoding, so those fields were stale. Records only when lastReceiveTimestamp
+  moved.
+- Unity 6: FindObjectsOfType -> FindObjectsByType(None). Rigidbody.velocity is obsolete but
+  forwards to linearVelocity; left as is (warnings only).
+- Verified against the v0.5.0 decompile: every other reflected member and patch target
+  exists, and all six authority-transpiler targets still contain their master checks.
+- NOT verified in a lobby yet. On an older game version 1.3.0 self-disables (new fields).
+Password-screen bug: user confirmed still greyed out with 1.2.24 (fully inert) - RevivalSync
+ruled out. NetworkConnect reparents the password page and the cursor out of the menu
+hierarchy; REPO Fidelity's ultrawide mode then shifts its buttons ~130px while its mouse
+remap patch failed to load (ambiguous UIMousePosToUIPos). Top suspect; user to test with
+REPO Fidelity off.
+1.3.0 CONFIRMED in a real lobby (2026-10-29, client, asia region): 13/13 patches, 38 objects
+registered, host packets +40..+460 per 10s, held cart drift 0.0-0.6m, zero RevivalSync errors.
+User: "working flawlessly". That session ran RevivalSync ALONE - the user had turned the rest
+off. The prior session's 18,485 errors were ALL REPOConfig 1.2.6 (MenuPageMain.Start hook NRE ->
+MenuPageMain.Update NRE every frame) - REPOConfig/MenuLib/REPO Fidelity are broken on v0.5.0.
+Benign log pattern: [stale-grab] right after a sub-0.2s grab/release on a cart = the host's
+late GrabPlayerAddRPC re-adding us after we already let go; the scrub cleans it (1.2.16).
+
+## 1.3.1 - mod compatibility (CartSpeedSync off, REPO Fidelity cart-handle skip removed)
+
+Every archived session since July 2026 ran BOTH REPO Fidelity (1.7.7/1.7.8) and CartSpeedSync.
+The one "flawless" session (2026-10-29 20:28) is the only one with neither. Scanned every hook
+of every mod in the profile (Compat scan): only these two touch RevivalSync's code paths.
+- CartSpeedSync postfixes CartSteer (sprint push). RevivalSync runs CartSteer locally for the
+  held cart -> our copy outruns the host's. Measured on held carts: avg drift 0.37m -> 0.78m,
+  max 1.2 -> 2.1m. Now Harmony.UnpatchID("discjenny.CartSpeedSync") on the first frame
+  (Compat.Apply), always - user decision: "not supported, auto-disable".
+- REPO Fidelity GrabAreaIdleSkipPatch: prefix on PhysGrabObjectGrabArea.Update that returns
+  false whenever !IsMasterClientOrSingleplayer -> our Instant Cart Handle transpiler never ran.
+  Hardcoded (Settings.AllocationFixesEnabled = true, no config). Removed that one prefix only.
+  NOT removed: PhysGrabObjectFixPatch (skips PhysGrabObject.Update for sleeping un-grabbed
+  objects, culls grabbers with grabbed=false) - possible edge effects at grab start, unproven;
+  F11 in-game toggles it if ever suspected.
+CAUTION for the record: this does not mean every past bug was Fidelity. The rotation backstop,
+cargo carry, upgrade theft etc. were real RevivalSync bugs with their own log proof.
+REPO Fidelity's stuck Graphics page on v0.5.0 = it builds that page with MenuLib, whose button
+template is gone (see REPOConfigFix, a separate local stopgap in Documents\REPOMods\REPOConfigFix).
+
+## 2026-10-29 evening - "first session was flawless, later ones not" (1.3.2 adds ping)
+
+Held-cart drift is NOT corrected while held (NR rule), so it is a pure trail: drift ~= speed x lag.
+drift/speed per session: flawless 20:28 = 0.165s; 21:29 = 0.220s; 21:35 = 0.196s; 21:38 = 0.208s
+(the 20:48 CartSpeedSync session: 0.212s at much higher speed + double drift). Later sessions also
+pushed the cart ~20% faster (2.9 vs 3.4 m/s). So the later sessions were ~30-55ms laggier
+connections (different rooms each time) plus faster play - not a mod regression. The 21:38
+session ran only REPO_HD + MoreStamina + True Ultrawide beside RevivalSync (graphics-only hooks,
+no overlap) and still showed 0.208s. Zero snaps / stuck / handbacks in all of them.
+Lesson: before hunting a regression in "feel", normalise drift by speed - it is a lag gauge.
+1.3.2 logs PhotonNetwork.GetPing() in [stats] so the next comparison needs no inference.
+
+## 1.3.3 - Self_Hosted_Photon (zyxterus 0.1.0) compat; reviewed PhotonV4ServerVoiceFix (gil666 2.1.1)
+
+User installed both to self-host Photon (loop = client ping to the host PC, instead of client +
+host ping to a Photon Cloud region). Read both fully: no network/file access beyond config, no
+PhotonNetwork touch at plugin load, no overlap with RevivalSync's hooks.
+- Self_Hosted_Photon: prefix on DataDirector.PhotonSetAppId (GpBinaryV16, empty AppIds,
+  Server/Port from config, UseNameServer=false) + Lobby.SetData region "eu" + replaces
+  MenuPageRegions.Start with a "Custom Host" page. That coroutine calls
+  SteamManager.SendSteamAuthTicket, GONE in v0.5.0 (now Platforms.PlatformManager
+  .SetPhotonAuthTicket) -> MissingMethodException, region page never loads. Compat prefixes
+  ITS StartPrefix and runs the same page with the v0.5.0 sequence (copied from the game's own
+  GetRegions). Gated on the old method being absent, and on the mod's own Enabled config.
+  WARNING to users: it defaults Enabled=true, Address=127.0.0.1 - with it on, normal lobbies
+  connect to nothing.
+- VoiceFix: all targets exist on v0.5.0 (VoiceConnection.Init/cppCompatibilityMode,
+  LoadBalancingTransport(2), LocalVoice.TransmitEnabled, ExitGames ByteArraySlice in
+  Photon3Unity3D). Note: it forces cppCompatibilityMode even on Photon Cloud. No action.
+csproj: + UnityEngine.UIModule, Unity.TextMeshPro references (compat UI code).
+
+## 1.4.0 - Trajectory Matching (third attempt at in-flight sync; off by default)
+
+History: 1.2.1 led the host target by ping (moving target -> vibration/braking), 1.2.13
+reverted to NR's still target + 0.6s blind throw grace (carts 1.5s). The grace is why a
+throw "flies alone, then settles". Third attempt, the standard netcode technique:
+- Compare host packet (host time T = info.SentServerTimestamp) with OUR state at T - L,
+  from a 64-sample per-tick history (server clock). L = upload lag us->host sim, learned
+  per flight by nearest-point match on the path (speed > 2 m/s, < 0.75m), smoothed 0.15,
+  seeded ping + 30ms. NOT "host now" (pulls throws back) and NOT "host extrapolated"
+  (target moves between packets). The correction only changes on a packet -> 1.2.13 rule kept.
+- Corrections we apply are accumulated into each sample (corr/corrV) so an in-flight packet
+  is not counted twice: compare against sample.pos + (corrNow - sample.corr).
+- remaining = error (REPLACE, never add), applied 15%/tick to position and velocity.
+- Ends (-> normal sync with postThrowRamp 0.4): contact (|dv - g dt| > 2 m/s after 3 ticks),
+  error > 2.5m, hostKinematic (caught on host), riding a cart, snap, 3s, or still 8 ticks.
+- Held cart: same comparison, xz only, 0.25m deadband, 6%/tick, cargo carried (CarryCargo) -
+  removes only real disagreement, never the ping trail (NR held rule otherwise intact).
+- History recorded only while held (so a throw's first packets, which describe the object
+  still in hand, have something to compare with) and during tracked flight.
+Log tag [traj] per flight: why it ended, packets, learned lag, avg/max error.
+Cleanup audit: no unused methods (all single-reference ones are Harmony entry points);
+removed dead SimState.stuckTimer (written 5x, never read) and ridingCart (never read);
+rewrote the stale SimManager header (still described pre-v0.5.0 capture, "doors not simulated").
+Per-tick cost is O(objects) with cheap checks - there was no real slowness to remove.
+
+## 1.4.1 - Trajectory Matching: track through contacts
+
+First 1.4.0 session (2026-10-30, ping ~85ms): 23 tracked flights, error avg 0.02-0.22m,
+learned lag stable 124-171ms (~140), 0 snaps - the matching itself works. But 7/9 item
+flights ended on "contact" after 0.26-0.44s and fell back to the plain sync, which lerps a
+still-MOVING object toward the host's ~140ms-old position = the old settle, one bounce
+earlier. User: "meh". Contacts no longer end tracking (counted for the log); time alignment
+already pairs our bounce with the host's. Timeout 3s -> 6s. Still ends on: still 8 ticks on
+both, > 2.5m divergence, caught on host, cart riding, snap.
+Lesson: an exit condition that hands a MOVING object to the raw sync reintroduces exactly
+the lag artefact the feature removes - exit only when both copies are at rest.
+Also: REPOConfig/MenuLib were taken over by REPOModding (REPOConfig 1.2.7, MenuLib 2.6.0)
+and work on v0.5.0; the local REPOConfigFix stopgap is retired (user removed it).
+
+## 1.4.2 - reset switch; release candidate
+
+User: "revert to default doesn't work". REPOConfig 1.2.7 has TWO buttons: "Revert" only drops
+UNSAVED changes (no-op when nothing is pending - looks broken), "Reset To Default" (first row of
+the mod's scroll list, confirm popup) sets BoxedValue = DefaultValue for every entry. Ours all
+have defaults, so that works. Added a self-clearing "3. Debug / Reset All Settings To Default"
+switch anyway (works without REPOConfig, honoured at startup if set in the .cfg); one Save at
+the end via SaveOnConfigSet=false; re-entrancy guarded (the loop resets the switch itself).
+Note: the user's own cfg had Trajectory Matching ON because it was set there for testing
+(1.4.0) - the shipped default is OFF.
+Release check (zip): versions 1.4.2 everywhere, workflow description == manifest (243
+chars), 5 files, 0 personal-info hits in md/json/dll, Trajectory default false.
+
+## 1.4.3 - full review (2026-11-10) against the Nov 5 game build
+
+GAME (Assembly-CSharp dated 2026-11-05, still ".net3" Photon version): all 70 reflected
+members + patch targets exist; all six authority-transpile targets keep their master checks;
+PhysGrabObject/Cart/Hinge/Grabber within +-2 lines of the Oct 29 build. Static check only -
+no session has run on this build yet.
+NEW in PhotonTransformView: OverrideExtrapolate(maxTime, time=0.2) + VelocityFollow
+(velocityFollowStrength 10) + public receivedServerTimestamp / receivedAny / NetworkPositionGet.
+Only caller: ItemVehicle.NetworkExtrapolateTick (the vehicle and its seated players' tumble
+views). ItemVehicle is 10k lines now, host-simulated with CLIENT-SIDE MESH PREDICTION
+(nonLocalMeshPrediction*) - the devs predict visuals, not physics. No cargo list on vehicles.
+The decode's rigidbody writes are the same set our transpiler filters.
+
+BUGS FOUND AND FIXED
+1. Trajectory: packetFresh set during the hold survived release; EndLocalGrab overwrites
+   hostPos with our release state, so flight tick 1 compared a fake host position with our
+   state ~lag ago -> forward shove of speed x lag. Matches the 1.1-1.2m "max error" on 4 of
+   23 flights in the 1.4.0 session (the hard throws). Cleared in TrajBeginFlight.
+2. Trajectory: velocity corrections were not counted as delivered position correction
+   (corr tracked only direct position writes) -> later packets, describing moments before
+   the correction, re-requested the same error. Now corr += corrV * dt each flight tick.
+3. Compat/Self_Hosted_Photon (1.3.3): our prefix on THEIR static StartPrefix declared
+   `MenuPageRegions __instance`. Harmony special-cases that name: static original => null.
+   Would NRE exactly where the original crashed. Now `__0`. RULE: when hooking another
+   mod's static patch method, take its parameters by index, never by a Harmony-reserved name.
+4. Smoothing vs the game's new vehicle prediction: our Update postfix MovePosition()s every
+   non-simulated view onto an interpolated past snapshot, undoing VelocityFollow. Skip (and
+   drop history for) any view whose overrideExtrapolateTimer > 0 (optional accessor).
+
+LOOKED AT, DELIBERATELY NOT CHANGED
+- HostStalled can false-positive since v0.5.0 when the host is alive but everything (host
+  avatar included) is quiet for 2s: shadow sync pauses until any host packet arrives. The
+  obvious refinement ("only stalled for objects last reported moving") would bring back the
+  frozen-host pinning the guard exists for. No log evidence of harm - left alone.
+- Suppressed views do not tick throttleDisableTimer / overrideExtrapolateTimer: both are
+  only read on the host or for vehicles/tumbles, which we never suppress.
+- Client-side PhotonTransformView.Teleport callers are master-gated or cosmetic; host
+  teleports arrive as a revision bump and are handled.
+- Per-tick cost: O(objects) of cheap checks; nothing worth optimising. Possible later
+  tidy-up: split SimManager.cs (1660 lines) into Held / Shadow / Hinge / Cart partials.
+
+OPEN PROPOSALS (not built)
+A. HOST ASSIST: when the host also runs RevivalSync, the holder streams its held object's
+   state to the host (custom event), the host steers its copy to it (bounded), skips its own
+   Throw for that release and takes the client's release velocity. Removes the client+host
+   loop for holds and throws entirely; falls back to today's behaviour on a vanilla host.
+B. Instant A/B hotkey (prediction on/off mid-level) + optional on-screen ping/lag readout.
+C. Client send-rate 25 -> 50 as an option (~10-15ms of the loop).
+D. Trajectory Matching on by default once 1.4.3 is validated; then retire the blind grace.
+E. Self-propelled valuables: dynamic exemption while active (still latent, unconfirmed).
+   [DROPPED in 1.5.3 - the prediction was wrong, see that entry.]
+PROFILE NOTE: the user's profile holds two copies (Revival-RevivalSync and
+Revival-RevivalSync-1.4.0); BepInEx loads one. The -1.4.0 folder is a leftover local import.
+
+## 1.5.0 - Host Assist (experimental, off by default, UNTESTED - needs two modded machines)
+
+HostAssist.cs. Negotiation: each instance with the option on sets player property "rsync";
+a client streams only when the MASTER has it. Client: every other physics tick while holding
+(non-hinge) RaiseEvent 187 -> MasterClient, unreliable: {viewId,pos,rot,vel,angVel,false};
+on EndLocalGrab the same with release=true, RELIABLE (sent after the game's GrabEndedRPC, so
+the host has already run its own Throw - the release event overwrites pos/rot/vel with ours).
+Host (Tick, the only thing the mod does while hosting): for entries fresher than 0.25s whose
+sender is in playerGrabbing on the host and whose reported pos is within 4m of the host copy:
+grabber.OverridePhysGrabForcesDisable(0.1), velocity = vel + gap*10 (the game's own
+VelocityFollow gain), same for rotation; clamp 30. Kinematic bodies and hinges skipped.
+KNOWN UNKNOWNS: carts - the host's CartSteer also writes velocity for handle grabs and script
+order vs our Tick is unverified (may partly fight); two players holding one object; event
+code 187 assumed free. First things to check in a two-machine test.
+
+## 1.5.1 - doors: predict PhysGrabHinge.closed (first two-modded-machine session, 2026-11-10)
+
+Session: client on a host running 1.5.0 + Host Assist ("[assist] the host runs..." logged).
+Trajectory after the 1.4.3 fixes: error avg 0.00-0.05m, max 0.17m (was up to 1.2m). User:
+"doors were buggy, at least the first doors" - 7 tugs of 0.2-1.0s on one Wizard Door Double.
+ROOT CAUSE (never handled since doors went local in 1.1.x): `closed` is set only by the host's
+Open/CloseImpulseRPC (MasterOnlyRPC). While closed, FixedUpdate pins the door to restPosition
+and zeroes its velocity every tick; the OpenImpulse() our transpiled logic calls is a no-op on
+a client. So a shut door could not move locally until the host's reply (~one loop).
+FIX: postfix OpenImpulse/CloseImpulse -> set `closed` locally for simulated hinges; postfix
+CloseImpulseRPC -> ignore a stale host close while we hold/push and opened < 0.6s ago.
+Self-heals if the host never opens: angle sync brings it back, local logic closes it again.
+REMEMBER: HingeImpulsePredictPatch is in patchTypes (the two-list rule).
+
+## 1.5.2 - Host Assist: carts + release tail
+
+1.5.0 session (client log): held cart drift 1.1-1.2m at 4.8 m/s = 0.24s x speed, IDENTICAL to
+no assist. Cause: host PhysGrabCart.CartSteer (handle grabs) does linearVelocity =
+MoveTowards(...) + ClampMagnitude every tick toward a follow point behind the HOST's (late)
+view of the player - it overwrote our steering. Fix: postfix CartSteer -> HostAssist
+.AfterCartSteer re-applies the holder's state (HostAssistCartPatch, in patchTypes).
+Release: 1.5.0 wrote rb.position on the host (a cart 1m behind jumped, through its cargo),
+and the client's Trajectory Matching then steered against a host that used a different lag
+(0.24s held vs TrajLag 0.131) = the "cart corrects when I suddenly let go". Now: no position
+write; the release event only stamps releasedAt; the client keeps streaming for Tail=0.4s
+(SimState.assistTail, sent from TickShadowInner) and the host keeps following the ex-holder
+for Tail+0.2s while nobody else grabs it. Client: with HostAssist.Active, TrajBeginFlight and
+TrajHeldCart stand down (the host follows US - steering toward it chases our own echo); the
+plain throw grace applies. Also: a tracked flight ended by a re-grab now logs ("grabbed again").
+EXPECT in the next client log if it works: held cart drift ~ speed x (ping + ~40ms) i.e.
+~0.6m at 4.8 m/s on an 85ms ping, instead of 1.2m.
+
+## 1.5.3 - Host Assist stays off scripted objects; the "latent class" was mis-predicted
+
+Found by tracing the knowledge graph (graphify): PHYSICS-COVERAGE's "two conditions where
+host data is withheld" node links to TickHeld, and TickHeld now calls HostAssist.ClientSend
+- the doc predated Host Assist. No log, no playtest: this entry is code reading only.
+
+CORRECTION to the 2026-07-25 audit (item 1) and to proposal E in the 1.4.3 review: the
+"hold a flying plane/broom and it goes dead in your hands" prediction is WRONG. Read on the
+Nov 5 build: ValuablePlane's forces are NOT master-gated (FixedUpdate -> StateMachine, state
+by UpdateStateRPC; line 115 only gates ServerSideThink) and the host idles it while anyone
+holds it or it is in a cart; WizardBroom while grabbed is zero-g + low drag with no
+propulsion and stops in a cart; CubeBall's impulses all require !grabbed. The July audit
+saw "master gate + forces in the same file" and did not read which state the forces run in.
+LESSON: a gate and a force in one file is a lead, not a finding - read the grabbed branch.
+Proposal E (dynamic exemption for self-propelled valuables) is dropped.
+
+REAL ISSUE (1.5.0-1.5.2): HostAssist.Steer replaces everything the host does to a held
+object - grabber.OverridePhysGrabForcesDisable makes PhysGrabObject.PhysicsGrabbingManipulation
+`continue` past that grabber (line 1107), skipping the pull AND the TurnXYZ orientation
+torque, and both velocities are overwritten every tick. On a scripted object that cancels,
+for every player: gun recoil (ItemGun 563/692), melee swing forces (ItemMelee 922/1297/1330),
+trap jolts (ScreamDoll 37-43, IceSaw 147-154 while grabbed), and mirrorHeldRot items chase
+their own echo (we copy host rotation, host copies ours).
+FIX: HostAssist.HostDrivenReason(pgo, isCart) -> SimState.hostDriven at registration. Not
+streamed: any ItemAttributes object, anything with a Trap component, any script named
+*Valuable* (minus a small plumbing list) or MuseumProp*. HostAssist.For(st) replaces
+HostAssist.Active at the three per-object call sites (release tail, TrajBeginFlight,
+TrajHeldCart) so a host-driven object gets Trajectory Matching again. The host runs the same
+check when a stream starts (Entry.hostDriven), which covers a 1.5.2 client. Carts and plain
+loot unchanged. A 1.5.3 client is fine on a 1.5.2 host (it just does not send those).
+NAME HEURISTIC, KNOWN WEAKNESS: a new game script that is neither a Trap nor named *Valuable*
+keeps the assist (cosmetic loss only); a new plumbing component named *Valuable* turns the
+assist off for everything carrying it - verbose log prints per grab "[assist] X: streamed to
+the host" / "not streamed - the host drives it (Script)". FIRST THING TO CHECK in the next
+two-machine log: plain loot must say "streamed".
+Unchanged by design (since 1.2.14): the holder does not feel host-only jolts/recoil on what
+they hold. graphify-out/ is gitignored (generated; rebuild with /graphify).
+
+## 1.5.4 - weapons back to vanilla, active drones host-driven, drone hand-back state bug
+
+FIRST SESSION WITH BOTH LOGS (2026-11-14, client session-20261114-134321, host
+session-20261114-134259, both 1.5.3, ping ~90ms). User: "super smooth with host assist but
+weapons especially melees move weird and incorrect, a thrown weapon glitches out, same with
+drones; feather drone used on an item then turned off -> item falls through the floor, F4".
+1.5.3 CHECK PASSED: carts and plain loot log "[assist] ...: streamed to the host"; held cart
+drift 0.1m (was 1.1-1.2m). Host Assist for carts works.
+
+WEAPONS. Not a Host Assist problem: the user switched it off mid-session (no [assist] lines
+09:52:40-09:53:30, carts got [traj] lines again) and the bat behaved the same. Numbers: held
+drift 0.22s x speed; thrown-item error avg 0.10-0.25m, max 0.36 (revolver) / 0.53 (sledge) /
+1.10 and 1.06 (bat) vs 0.03-0.07 avg, 0.11-0.13 max for a valuable in the same minutes.
+CAUSE: the local weapon replica (1.1.8/1.2.0: TurnXYZ from aimVerticalOffset / forwardTilt,
+torque 2) no longer describes the game. Nov 5 build, all master-only: ItemGun.UpdateMaster
+only TurnXYZ's when out of ammo, otherwise torque 12 + AimTargetUpdate (aims the muzzle at
+the crosshair target) + OverrideGrabVerticalPosition; ItemMelee has TurnWeapon (turns with
+the swing direction), StateSwinging, ScrollSwingStartRPC -> host impulse (the holder's own
+scroll swing never happened locally), ReleaseTorqueLogic (922), LowMassAngularDamping.
+THE 1.4.3 REVIEW MISSED THIS: it verified that every reflected MEMBER still existed, not
+that the BEHAVIOUR we copied was still the behaviour. LESSON: a local replica of game logic
+needs a behaviour diff on every game update, or it should not exist.
+FIX: CanSimulate returns false for ItemGun / ItemMelee (GetComponentInChildren). Vanilla
+sync = correct by construction, host-laggy in the hand (the trade NR made for all powered
+items). Removed the dead replica: SimState.gun/melee, meleeYRot, both ApplyHeldOrientation
+branches. mirrorHeldRot is now simply "is an item".
+IF INSTANT WEAPONS ARE EVER WANTED AGAIN: not by copying fields. Either run the game's own
+master-only weapon methods for the locally held weapon (the 1.1.1 warning applies - it was
+tried by transpiling and went badly) or accept vanilla.
+
+DRONES. (a) Item through the floor - exact sequence in the client log 09:51:47.51: camera
+thrown (TrajBeginFlight, flying=true), 15ms later "magnet-grabbed" -> droneExempt. Nothing
+ticks while exempt, so the flight froze. 09:51:51.39 drone switched off -> TickShadowInner
+-> TrajStep resumed the 4s-old flight: 16 ticks of "Setting linear velocity of a kinematic
+body" (vanilla sync had left it kinematic; TrajStep runs before the kinematic handling),
+"landed after 0.32s, 1 packets, error avg 2.14m" = one correction of 2.14m against a path
+recorded before the drone carried it off. Same again 09:52:10 (0.35m). F4 each time.
+FIX: ClearTransientSync(st) on BOTH exemption transitions (traj reset, throw grace/ramp,
+noSnap, assist tail, desync/far timers, wasRiding, hostTeleport), plus on a release while
+exempt. RULE: any state that describes "a moment in progress" must be cleared when an
+object crosses between our simulation and vanilla sync, in either direction.
+(b) Active drone in the hand: droneOnly had `!st.localGrab &&` in front of BOTH terms, so a
+switched-on drone was simulated locally while held although ItemDrone.FixedUpdate (934+,
+master-only) is what moves it. Now `toggleState` alone decides for the drone itself; the
+1.2.8 "player grab wins" rule still applies to the drone's TARGET. While exempt: pgoIsMaster
+forced false every tick, StartLocalGrab does not claim (localGrab is still recorded so we
+take over when it is switched off in the hand), and the exempt branch catches an unseen
+release (TickHeld is not running) and scrubs a stale local grabber entry.
+
+SEEN, NOT FIXED (need the user to say what it was): an object named "Head" (view 83,
+registered at level start) was teleported 22.4m at the moment an enemy orb spawned, grabbed
+and streamed at 09:51:27, and at 09:52:23 was in the user's hand while the host's copy was
+kinematic 3km away (drift=2999.5). The pooled-host rule (1.2.12) leaves our copy in the
+world on purpose; if "Head" is something that should vanish, that rule needs an exception.
+Host log: 56 ticks of "Setting linear/angular velocity of a kinematic body" at 09:50:04 with
+no client grab and nothing streamed - not Host Assist (Steer returns on kinematic), source
+unknown (host also runs Admin Menu, REPOLib, MenuLib).
+trajLag swung 123 -> 275 -> 162ms in one session: it is one global value, and since 1.5.3
+only non-streamed objects feed it. Not acted on.
+
+## 1.6.0 - Host Assist automatic, Instant Weapons (game's own logic, locally), bomb head
+
+NOTHING IN THIS ENTRY HAS BEEN PLAYED. 1.5.4 was never played either (the user went straight
+to these requests). Next log must be read against BOTH entries.
+
+USER ANSWERS: "Head" = the Cleanup Crew's head (EnemyBombThrowerHead) - "he dropped his
+head which blew up". Wants instant weapons back ("the last thing to perfect this mod"),
+Host Assist automatic when the host has the mod with a switch to force it off, and the
+store description to recommend everyone installs it.
+
+HOST ASSIST AUTOMATIC. New config key "Host Assist" default TRUE (the old key "Host Assist
+(experimental)" is orphaned on purpose: its saved false would keep it off for every 1.5.x
+user). Player property "rsync" now carries a protocol number: 2 (1.5.x wrote 1), 0 when
+switched off. A client streams only to a host with >= 2, so 1.6.0 never streams to a 1.5.x
+host. CONSEQUENCE: with default on, HostAssist.HostTick/Steer now runs on every modded host
+- the mod is no longer "inert while hosting" by default.
+manifest + publish.yml description (must match, 249 chars): "[Experimental]
+NetworkingReworked replacement. Singleplayer-feel multiplayer for R.E.P.O. v0.5.0+: instant
+carts, doors, items. Works with unmodded hosts; best when everyone has it (Host Assist
+auto-enables). CartSpeedSync auto-disabled. By Revival."
+
+INSTANT WEAPONS (config "Instant Weapons (experimental)", default OFF; the user's own cfg is
+set to true for testing). Design: do not copy weapon logic - run the game's. WeaponAuthority
+Patch swaps SemiFunc.IsMasterClientOrSingleplayer() for "master, or this is the simulated
+weapon the local player holds (or released < 0.1s ago)" in exactly: ItemGun.UpdateMaster,
+ItemGun.AimTargetUpdate, ItemMelee.FixedUpdate, ItemMelee.TurnWeapon,
+ItemMelee.ScrollSwingAnimationTick, ItemMelee.ScrollSwingStartRPC. Each was read for side
+effects: they pose/tune the held weapon only. What stays host-only because it has its OWN
+gate in a method not on the list: ItemMelee.StateSet (called from the swing detection we now
+run - a no-op on a client), BatteryCheckLogic, MeleeBreak/MeleeFix, ItemGun.ShootLogic,
+ShootRPC's host half, ShootBullet, Misfire. BEFORE ADDING A METHOD TO THE LIST: read every
+call it makes; a method that sends an RPC or changes state must not be on it.
+Scroll swing: the game sends ScrollSwingStartRPC to the MASTER only. MeleeScrollSwingPatch
+(prefix/postfix on ScrollRotateLogic) sees a swing start as one of the two scroll cooldowns
+going UP, then invokes ScrollSwingStartRPC locally with the camera right axis and direction
+(localCall flag); the transpiler turns its `IsMultiplayer()` sender check into "host only";
+MeleeScrollSwingReceivePatch drops any non-local call on a client. Recoil: GunRecoilPatch
+postfix on ShootRPC applies the one-line host impulse to our copy (sender must be master).
+SimState.weapon (no rotation mirror for weapons - it would fight the aim), releasedAt.
+Host Assist: HostDrivenReason returns null for ItemGun/ItemMelee - a weapon is only streamed
+by a client that runs its logic, so its copy is the complete one; the host follows it.
+WHY THIS IS NOT THE 1.1.0 MISTAKE (which did transpile these and "buzzed violently"): in
+1.1.0 a held object was also steered toward the host every tick and mirrored its rotation,
+and OverrideTimersTick was not yet transpiled. Since 1.2.14 nothing touches a held object.
+That is the argument; the playtest decides. IF IT BUZZES: the switch is off by default and
+1.5.4 behaviour is one click away; look first at anything else writing the held weapon's
+rotation targets (grabber.cameraRelativeGrabbedForward/Up).
+FOUR NEW PATCH CLASSES in patchTypes: WeaponAuthorityPatch, MeleeScrollSwingPatch,
+MeleeScrollSwingReceivePatch, GunRecoilPatch (loaded line should read "Patches: 19 ok").
+CHECK FIRST IN THE NEXT LOG: the loaded line count and any "WeaponAuthorityPatch:" /
+"MeleeScrollSwingPatch:" warning; "[assist] Item Gun/Item Melee ...: streamed to the host";
+held weapon drift and thrown-weapon [traj] error vs the 1.5.3 numbers above.
+
+BOMB HEAD. EnemyBombThrowerHead has its own PhysGrabObject/PhotonView and is not parented
+under Enemy/EnemyRigidbody, so CanSimulate let it in. All its motion is master-only (hop
+toward players 216-293, throw 165-169) and between throws the host calls OverrideDeactivate
+- ON THE MASTER ONLY (133-135), so on a client the object stays "active" and only its
+position goes to physDisabledPosition. Our pooled-host guard (1.2.12) then left our copy
+where it lay: a grabbable ghost. FIX: CanSimulate false for that component. GENERAL RULE:
+a despawn that is "teleport to the parking spot" with no client-side deactivate means the
+object is host-driven and must not be simulated; the pooled-host guard is right for objects
+that also deactivate locally.
+
+## 1.6.1 - Host Assist release tail runs until the object rests (first 1.6.0 session)
+
+SESSION 2026-11-14 10:27 (client session-20261114-142728, host session-20261114-142740, both
+1.6.0, game reports v0.5.1 = the Nov 5 DLL, ping ~88ms). ~2.5 minutes in a level.
+1.6.0 CHECKS: "Patches: 19 ok, 0 failed" on both, no WeaponAuthorityPatch / MeleeScrollSwing
+warning; "[assist] Item Melee Baseball Bat / Item Gun Shotgun: streamed to the host"; host
+logged "a client is streaming held objects". User: "its instant but when dropped it
+glitches" - then "keep it off for now till we find a proper fix". NO BUZZING REPORTED: the
+1.1.1 fear did not materialise in this (short) session. Scroll swing / recoil: not mentioned.
+Held drift under assist: bat 1.0m @ 5.9 m/s, 0.6 @ 10.3, 0.4 @ 5.3 = roughly 0.06-0.17s x
+speed. NOTE for reading these numbers: `drift` compares our copy with the host state AS
+RECEIVED, so even a host that follows perfectly shows speed x (up + down latency); it is
+not the host's real error. The 1.5.2 "expect 0.6m" note made the same simplification.
+
+THE DROP. No data in the log - under assist a release has no [traj] line and nothing else
+measured it (fixed below). Reasoning from the code: release -> client keeps pure local
+physics for PostThrowGrace 0.6s; it streamed for Tail = 0.4s and the host followed for 0.6s.
+A drop from hand height lands at ~0.45s, so the host's copy did its landing and bouncing on
+its own, and at 0.6s ours was blended to wherever the host's had stopped. For a compact
+valuable that is a few cm; for a bat or shotgun it is a different lying angle = a visible
+slide/turn. Same path as plain loot ("super smooth") - the shape of the object is the
+difference, not weapon code. UNPROVEN until the new log line says so.
+FIX: SimManager.TickAssistTail. Tail is now a 4s LIMIT; the client streams and stays in
+pure local physics (postThrowTimer held at >= 0.1) until its copy has been still for 15
+ticks, or: assist off, landed in a cart, another player grabbed it (HeldByAnotherPlayer),
+host kinematic (ignored for the first 0.5s - packets from "still in your hand" arrive after
+the release), time limit. Host follows the ex-holder while the stream is fresh, up to
+Tail + 0.5s. Protocol 3 (a 1.6.1 client does not stream to a 1.6.0 host, which would stop
+following at 0.6s while the client waited for rest).
+NEW LOG LINE, the proof: "[assist] X: release followed for 0.92s (at rest) - host copy
+0.03m / 4 deg away, packet 0.05s old". Small numbers there + still "glitches" = the cause is
+elsewhere (then look at: the 0.1s post-release weapon window in HeldWeaponBody, the game's
+ReleaseTorqueLogic, host Throw vs our LocalThrow). Big numbers = the host is not following
+(check gap > MaxGap 4m, stream freshness, the host's own log).
+Instant Weapons: default stays off; the user's cfg set back to false at their request. To
+test this fix on weapons it has to be switched on again.

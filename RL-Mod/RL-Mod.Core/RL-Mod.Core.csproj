@@ -1,0 +1,20 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <!--
+    RL-Mod.Core: game-independent netcode logic.
+    Borrowed design from rl2-coop (ClockSync / SnapshotBuffer / Interp) and
+    hardened validation. Contains NO reference to Unity, BepInEx, Harmony,
+    LiteNetLib, or the game. Compiled as netstandard2.0 so the net472 game
+    plugin and the net8.0 test runner can both reference the same source.
+    Zero NuGet dependencies (netstandard2.0 ref pack ships with the SDK).
+  -->
+  <PropertyGroup>
+    <TargetFramework>netstandard2.0</TargetFramework>
+    <LangVersion>9.0</LangVersion>
+    <Nullable>disable</Nullable>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AssemblyName>RL-Mod.Core</AssemblyName>
+    <RootNamespace>RLMod.Core</RootNamespace>
+    <GenerateDocumentationFile>false</GenerateDocumentationFile>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+</Project>

@@ -1,0 +1,1851 @@
+using System;
+using System.Collections.Generic;
+using System.Reflection;
+using HarmonyLib;
+using Photon.Pun;
+using UnityEngine;
+
+namespace RevivalSync
+{
+    /// <summary>
+    /// Every eligible PhysGrabObject on a client is simulated locally from the moment it
+    /// spawns. While nobody local is holding it, its rigidbody is continuously and gently
+    /// blended toward the host's streamed state ("passive shadowing" — the architecture of
+    /// the original NetworkingReworked). While the local player holds it, the blend pauses
+    /// and grab forces run locally for instant response.
+    ///
+    /// Host state is read from the game's own decode of each packet (EndHostRead) — since
+    /// v0.5.0 the payload is one packed byte[] per object. Doors and cabinets are simulated
+    /// too, with their joint kept alive and the game's own hinge logic running locally.
+    /// Thrown objects can optionally be steered onto the host's path in flight
+    /// (SimManager.Trajectory.cs).
+    /// </summary>
+    internal static partial class SimManager
+    {
+        internal class SimState
+        {
+            public PhysGrabObject pgo;
+            public PhotonTransformView ptv;
+            public Rigidbody rb;
+            public PhysGrabCart cart;       // set when this object IS a cart
+            public bool isHinge;            // doors/cabinets: local joint + the game's own hinge logic
+            public PhysGrabHinge hinge;
+            public HingeJoint joint;        // kept alive locally; unbreakable (host decides breaks)
+            public int viewId;
+
+            public bool localGrab;          // held by the local player right now
+            public float localPushTimer;    // hinges: local player/held object is pushing — go fully local
+            public float postThrowTimer;    // > 0 shortly after release: blend extra softly
+            public float postThrowRamp;     // after the grace: fade corrections back in (no brake)
+            public float noSnapTimer;       // recently thrown: landings glide to the host spot, never teleport
+            public float hingeSyncPause;    // door we just pushed/released: settle window before host truth resumes
+            public float hingeOpenedAt = -999f; // when we last opened this door ahead of the host
+            public float assistTail;        // Host Assist: time left to keep streaming after letting go
+            public float assistTailAge;     // (how long this release has been followed, for the log)
+            public int assistStill;         // (physics ticks our released copy has been at rest)
+            public bool hostDriven;         // Host Assist: scripted object, the host must keep driving it
+            public string hostDrivenWhy;    // (the script that makes it so, for the log)
+            public bool droneExempt;        // magnet drone drives this object: vanilla sync until released
+            public float farTimer;          // shadowed object stuck far from host: convergence backstop
+            public ItemDrone droneSelf;     // this object IS a drone: host-owned only while flying
+            public ItemToggle droneToggle;  // (toggled on = deployed = it moves itself)
+            public float desyncTimer;       // how long we've been far from the host's copy while holding
+            public float debugTimer;        // rate limit for verbose diagnostics
+            public int ridingTick;          // == current tick when sitting inside a locally-held cart
+            public bool wasRiding;          // rode a cart last tick: schedule a gentle staged return
+            public Trajectory traj;         // path history + in-flight steering (Trajectory Matching)
+            public float rideHoldTimer;     // carts: keep marking riders briefly after use ends
+            public bool mirrorHeldRot;      // item: copy the host's (straightened) rotation while held
+            public bool weapon;             // gun / melee: the game's own weapon logic runs for it in our hand
+            public float releasedAt = -999f; // Time.time of our last release (weapon release spin)
+
+            public bool hasHostState;
+            public float lastPacketTime = -999f;
+            public Vector3 hostPos;
+            public Quaternion hostRot = Quaternion.identity;
+            public Vector3 hostVel;
+            public Vector3 hostAngVel;
+            public bool hostKinematic;
+            public bool hostSleeping;
+            public bool hostTeleport;
+        }
+
+        private static readonly Dictionary<PhysGrabObject, SimState> states = new Dictionary<PhysGrabObject, SimState>();
+        private static readonly Dictionary<PhotonTransformView, SimState> byPtv = new Dictionary<PhotonTransformView, SimState>();
+        private static readonly List<SimState> tickBuffer = new List<SimState>(256);
+
+        // objects we handed back to the host mid-hold; no local grab authority until re-grabbed
+        private static readonly HashSet<PhysGrabObject> handedBack = new HashSet<PhysGrabObject>();
+        private static readonly List<PhysGrabObject> handedBackSweep = new List<PhysGrabObject>();
+
+        internal static bool Ready { get; private set; }
+        internal static int PacketsCaptured; // diagnostics
+        private static float lastCaptureTime = -999f;
+
+        /// <summary>True when the host has gone silent for EVERY object at once — game hung,
+        /// player leaving, or dead connection. A single quiet object just means its host copy
+        /// is at rest; world-wide silence means there is nothing live to sync toward.</summary>
+        internal static bool HostStalled => Time.unscaledTime - lastCaptureTime > 2f;
+
+        private static Vector3 disabledPos = new Vector3(0f, 3000f, 0f);
+        private static bool disabledPosRead;
+
+        /// <summary>Where the game parks deactivated/pooled objects (far above the map).
+        /// The host streams that position like any other, and blending toward it launches
+        /// our copy off the level — hence "objects aren't where they should be".</summary>
+        private static Vector3 DisabledPosition()
+        {
+            if (!disabledPosRead)
+            {
+                try
+                {
+                    if (AssetManager.instance != null)
+                    {
+                        var f = AccessTools.Field(typeof(AssetManager), "physDisabledPosition");
+                        if (f != null)
+                        {
+                            disabledPos = (Vector3)f.GetValue(AssetManager.instance);
+                            disabledPosRead = true;
+                        }
+                    }
+                }
+                catch { disabledPosRead = true; } // keep the known default
+            }
+            return disabledPos;
+        }
+
+        // ---- reflection accessors into game internals ----
+        private static AccessTools.FieldRef<PhysGrabObject, bool> pgoIsMaster;
+        private static AccessTools.FieldRef<PhysGrabObject, bool> pgoIsActive;
+        internal static AccessTools.FieldRef<PhysGrabObject, bool> pgoHeldByLocal;
+        internal static AccessTools.FieldRef<ItemToggle, int> togglePlayerId;
+        private static AccessTools.FieldRef<PhysGrabber, PhysGrabObject> grabberObject;
+        private static AccessTools.FieldRef<PhysGrabCart, List<PhysGrabObject>> cartItems;
+        private static AccessTools.FieldRef<PhysGrabCart, Transform> cartInCart;
+        private static AccessTools.FieldRef<PhysGrabCart, PhysGrabObjectGrabArea> cartGrabArea;
+        private static AccessTools.FieldRef<PlayerAvatar, bool> avatarSprinting;
+        private static AccessTools.FieldRef<PhysGrabHinge, bool> hingeBroken;
+        private static MethodInfo pgoThrow;
+
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvNetPos;
+        private static AccessTools.FieldRef<PhotonTransformView, Quaternion> ptvNetRot;
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvSmoothedPos;
+        private static AccessTools.FieldRef<PhotonTransformView, Quaternion> ptvSmoothedRot;
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvRecvPos;
+        private static AccessTools.FieldRef<PhotonTransformView, Quaternion> ptvRecvRot;
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvPrevPos;
+        private static AccessTools.FieldRef<PhotonTransformView, Quaternion> ptvPrevRot;
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvRecvVel;
+        private static AccessTools.FieldRef<PhotonTransformView, Vector3> ptvRecvAngVel;
+        private static AccessTools.FieldRef<PhotonTransformView, float> ptvDistance;
+        private static AccessTools.FieldRef<PhotonTransformView, float> ptvAngle;
+        private static AccessTools.FieldRef<PhotonTransformView, bool> ptvFirstTake;
+        private static AccessTools.FieldRef<PhotonTransformView, bool> ptvTeleport;
+        private static AccessTools.FieldRef<PhotonTransformView, bool> ptvIsSleeping;
+        private static AccessTools.FieldRef<PhotonTransformView, float> ptvKinForcedTimer;
+        // v0.5.0: the host's kinematic flag, its teleport counter, and the server time of the
+        // last packet the view actually applied (changes only when a NEW packet was decoded)
+        private static AccessTools.FieldRef<PhotonTransformView, bool> ptvKinematic;
+        private static AccessTools.FieldRef<PhotonTransformView, ushort> ptvTeleportRev;
+        internal static AccessTools.FieldRef<PhotonTransformView, int> ptvLastReceiveStamp;
+
+        internal static bool InitAccessors()
+        {
+            try
+            {
+                pgoIsMaster = AccessTools.FieldRefAccess<PhysGrabObject, bool>("isMaster");
+                pgoIsActive = AccessTools.FieldRefAccess<PhysGrabObject, bool>("isActive");
+                pgoHeldByLocal = AccessTools.FieldRefAccess<PhysGrabObject, bool>("heldByLocalPlayer");
+                togglePlayerId = AccessTools.FieldRefAccess<ItemToggle, int>("playerTogglePhotonID");
+                grabberObject = AccessTools.FieldRefAccess<PhysGrabber, PhysGrabObject>("grabbedPhysGrabObject");
+                cartItems = AccessTools.FieldRefAccess<PhysGrabCart, List<PhysGrabObject>>("itemsInCart");
+                cartInCart = AccessTools.FieldRefAccess<PhysGrabCart, Transform>("inCart");
+                cartGrabArea = AccessTools.FieldRefAccess<PhysGrabCart, PhysGrabObjectGrabArea>("physGrabObjectGrabArea");
+                avatarSprinting = AccessTools.FieldRefAccess<PlayerAvatar, bool>("isSprinting");
+                hingeBroken = AccessTools.FieldRefAccess<PhysGrabHinge, bool>("broken");
+                pgoThrow = AccessTools.Method(typeof(PhysGrabObject), "Throw");
+
+                ptvNetPos = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("m_NetworkPosition");
+                ptvNetRot = AccessTools.FieldRefAccess<PhotonTransformView, Quaternion>("m_NetworkRotation");
+                ptvSmoothedPos = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("smoothedPosition");
+                ptvSmoothedRot = AccessTools.FieldRefAccess<PhotonTransformView, Quaternion>("smoothedRotation");
+                ptvRecvPos = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("receivedPosition");
+                ptvRecvRot = AccessTools.FieldRefAccess<PhotonTransformView, Quaternion>("receivedRotation");
+                ptvPrevPos = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("prevPosition");
+                ptvPrevRot = AccessTools.FieldRefAccess<PhotonTransformView, Quaternion>("prevRotation");
+                ptvRecvVel = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("receivedVelocity");
+                ptvRecvAngVel = AccessTools.FieldRefAccess<PhotonTransformView, Vector3>("receivedAngularVelocity");
+                ptvDistance = AccessTools.FieldRefAccess<PhotonTransformView, float>("m_Distance");
+                ptvAngle = AccessTools.FieldRefAccess<PhotonTransformView, float>("m_Angle");
+                ptvFirstTake = AccessTools.FieldRefAccess<PhotonTransformView, bool>("m_firstTake");
+                ptvTeleport = AccessTools.FieldRefAccess<PhotonTransformView, bool>("teleport");
+                ptvIsSleeping = AccessTools.FieldRefAccess<PhotonTransformView, bool>("isSleeping");
+                ptvKinForcedTimer = AccessTools.FieldRefAccess<PhotonTransformView, float>("kinematicClientForcedTimer");
+                ptvKinematic = AccessTools.FieldRefAccess<PhotonTransformView, bool>("isKinematic");
+                ptvTeleportRev = AccessTools.FieldRefAccess<PhotonTransformView, ushort>("receivedTeleportRevision");
+                ptvLastReceiveStamp = AccessTools.FieldRefAccess<PhotonTransformView, int>("lastReceiveTimestamp");
+
+                if (pgoThrow == null)
+                {
+                    Plugin.Log.LogWarning("PhysGrabObject.Throw not found — throws will rely on host only.");
+                }
+
+                Ready = true;
+                return true;
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogError($"Accessor init failed: {e}");
+                Ready = false;
+                return false;
+            }
+        }
+
+        // ---- queries ----
+
+        internal static bool IsClientInLobby()
+        {
+            return GameManager.Multiplayer() && PhotonNetwork.InRoom && !PhotonNetwork.IsMasterClient;
+        }
+
+        internal static bool IsSuppressed(PhotonTransformView ptv)
+        {
+            return ptv != null && byPtv.TryGetValue(ptv, out SimState st) && !st.droneExempt;
+        }
+
+        /// <summary>The rigidbody of a simulated weapon the local player is holding (or let go
+        /// of a moment ago — the game's release spin runs on the tick after the release), else
+        /// null. `self` is the weapon script or anything on the same object.</summary>
+        internal static Rigidbody HeldWeaponBody(Component self)
+        {
+            if (self == null || states.Count == 0) return null;
+            PhysGrabObject pgo = self.GetComponent<PhysGrabObject>();
+            if (pgo == null) pgo = self.GetComponentInParent<PhysGrabObject>();
+            if (pgo == null || !states.TryGetValue(pgo, out SimState st)) return null;
+            if (!st.weapon || st.droneExempt || st.rb == null) return null;
+            return st.localGrab || Time.time - st.releasedAt < 0.1f ? st.rb : null;
+        }
+
+        internal static bool IsLocalGrab(PhysGrabObject pgo)
+        {
+            return pgo != null && states.TryGetValue(pgo, out SimState st) && st.localGrab;
+        }
+
+        /// <summary>True for every object we shadow locally — used to open the game's
+        /// master-only physics paths (cart stabilization, velocity clamps) on the client.</summary>
+        internal static bool HasPhysicsAuthority(PhysGrabObject pgo)
+        {
+            return pgo != null && states.TryGetValue(pgo, out SimState st) && !st.droneExempt;
+        }
+
+        /// <summary>True after a mid-hold handback: don't re-take grab authority until re-grabbed.</summary>
+        internal static bool IsHandedBack(PhysGrabObject pgo)
+        {
+            return pgo != null && handedBack.Contains(pgo);
+        }
+
+        internal static void ClearHandback(PhysGrabObject pgo)
+        {
+            if (pgo != null) handedBack.Remove(pgo);
+        }
+
+        /// <summary>
+        /// Objects whose behavior is owned by host-side systems stay vanilla: enemies,
+        /// tumbled players, hinged objects (doors/cabinets — host-managed joints and springs),
+        /// and shop/inventory items. Valuables, carts and plain physics props are simulated.
+        /// </summary>
+        internal static bool CanSimulate(PhysGrabObject o)
+        {
+            if (o == null || o.rb == null) return false;
+            if (o.GetComponent<PhotonView>() == null) return false;
+            if (o.GetComponent<PhotonTransformView>() == null) return false;
+
+            if (o.GetComponent<PhysGrabCart>() != null) return Plugin.SimulateCarts.Value;
+
+            if (o.GetComponent<PlayerTumble>() != null) return false;
+            if (o.GetComponentInParent<Enemy>() != null) return false;
+            if (o.GetComponentInParent<EnemyRigidbody>() != null) return false;
+            if (o.GetComponentInParent<PhysGrabHinge>() != null) return Plugin.SimulateHinges.Value;
+            // Item policy: the client controls what it touches; gadgets mirror the host's
+            // hold rotation gently. Objects whose motion comes from host-only logic stay
+            // vanilla: drivable vehicles, active drones, the self-propelled duck, cart
+            // turrets and (since 1.5.4) weapons.
+            // (The old NetworkingReworked blocked all powered items instead — stable,
+            // but every tool felt host-laggy in hand. We keep its blocklist only for
+            // the autonomous class, where it is unambiguously right.)
+            if (o.GetComponentInParent<ItemVehicle>() != null) return false;
+            // Cart turrets (the cart cannon and cart laser both live on ItemCartCannonMain)
+            // are held upright and aimed by MASTER-ONLY logic — the "GreatCorrector" it
+            // parents to the cart, plus rotationTargetY. A client runs none of that, so the
+            // only thing keeping a turret standing is the host's streamed rotation. Our
+            // cargo rule deliberately gives anything riding in a cart NO sync, so the turret
+            // had nothing holding it up and flopped over ("goes limp like the battery is
+            // dead"), recoverable only by spamming the resync key. Host-driven, exactly like
+            // drones and vehicles: leave it on the game's normal sync.
+            if (o.GetComponentInParent<ItemCartCannonMain>() != null) return false;
+            // Upgrade orbs are never simulated, no matter what. REPO decides who PERMANENTLY
+            // receives an upgrade purely client-side: ItemToggle fires on whichever client's
+            // own copy reads heldByLocalPlayer when Interact is pressed, and that client's
+            // player id rides the RPC unchallenged. Our instant grab makes that flag true
+            // locally with no host round trip, so on a contested orb (two players grabbing
+            // at it — exactly what passing one over looks like) the modded client wins the
+            // race and takes the upgrade. Nothing about holding an orb needs instant
+            // physics, so we stay out of it entirely and let vanilla decide.
+            if (o.GetComponentInParent<ItemUpgrade>() != null) return false;
+            // Weapons are host-driven (1.5.4). Up to 1.5.3 we simulated them and computed the
+            // hold orientation ourselves from their tuning fields, which matched the game of
+            // mid-2026. The Nov 2026 build moved their handling into master-only code we do
+            // not run: guns aim at the crosshair target (ItemGun.AimTargetUpdate) with their
+            // own grab height and torque, melee turns with the swing (TurnWeapon), swings on
+            // the scroll wheel (ScrollSwingStartRPC -> host impulse) and gets a release torque
+            // — plus recoil and swing forces. In the holder's hand none of that happened
+            // ("they move weird and incorrect"), and a thrown weapon left the hand in a pose
+            // the host never had, so its flight was corrected by up to 1.1m ("glitches out").
+            // Re-implementing ~300 lines of weapon logic that changes with every update is
+            // the 1.1.1 mistake again; vanilla sync is correct by construction.
+            // 1.6.0, "Instant Weapons": simulated again, but with the game's OWN weapon
+            // methods running for the weapon in our hand (WeaponAuthorityPatch) instead of a
+            // copy of them. Off = vanilla sync, as in 1.5.4.
+            if (o.GetComponentInChildren<ItemGun>(true) != null || o.GetComponentInChildren<ItemMelee>(true) != null)
+            {
+                return Plugin.InstantWeapons.Value && Plugin.SimulateItems.Value;
+            }
+            // The Cleanup Crew's bomb head (EnemyBombThrowerHead) is its own networked object,
+            // not a child of the enemy, so the Enemy checks above miss it. It hops after
+            // players and is parked off-map between throws by host-only code; simulated, it
+            // stayed lying where it fell and could be picked up as a ghost after it had
+            // exploded (1.5.3 session: in hand with the host's copy 3km away).
+            if (o.GetComponent<EnemyBombThrowerHead>() != null) return false;
+            if (o.GetComponentInParent<ItemAttributes>() != null)
+            {
+                foreach (Component c in o.GetComponentsInParent<Component>(true))
+                {
+                    if (c == null) continue;
+                    // drones are only host-owned while FLYING (dynamic exemption in
+                    // Tick) — a carried drone is just an item and deserves instant feel
+                    if (c.GetType().Name.StartsWith("ItemRubberDuck"))
+                    {
+                        return false;
+                    }
+                }
+                return Plugin.SimulateItems.Value;
+            }
+            return true;
+        }
+
+        // ---- host state capture (fed by the transform view's own decode) ----
+
+        /// <summary>Any serialization from the host counts as "the host is alive". Per-object
+        /// silence means nothing since v0.5.0: resting objects only send when they change,
+        /// and objects far from every camera drop to a 2s heartbeat.</summary>
+        internal static void NoteHostTraffic()
+        {
+            lastCaptureTime = Time.unscaledTime;
+        }
+
+        /// <summary>The view's receive bookkeeping right before the game decoded a host packet
+        /// into it — so EndHostRead can tell whether a NEW packet was actually applied.</summary>
+        internal struct HostRead
+        {
+            public SimState st;
+            public int stamp;
+            public bool firstTake;
+            public ushort teleportRev;
+            public int sentStamp; // server time the host sent this packet (Trajectory Matching)
+        }
+
+        /// <summary>The simulated object whose host packet the game is decoding right now.
+        /// While set, the decode's writes to that rigidbody are filtered (HostReadFilter).</summary>
+        internal static SimState activeRead;
+
+        internal static bool BeginHostRead(PhotonTransformView ptv, int sentStamp, out HostRead read)
+        {
+            read = default;
+            if (ptv == null || !byPtv.TryGetValue(ptv, out SimState st) || st.rb == null) return false;
+            read.st = st;
+            read.sentStamp = sentStamp;
+            read.stamp = ptvLastReceiveStamp(ptv);
+            read.firstTake = ptvFirstTake(ptv);
+            read.teleportRev = ptvTeleportRev(ptv);
+            // a flying drone is on vanilla sync (dynamic exemption): let the decode drive it
+            activeRead = st.droneExempt ? null : st;
+            return true;
+        }
+
+        /// <summary>
+        /// Since v0.5.0 the host's state arrives as ONE packed byte[] per object. Rather than
+        /// re-implementing that format (and breaking on the next tweak), the game decodes it
+        /// for us and we copy the result. The decode's writes to the rigidbody itself are
+        /// filtered out while it runs (see TransformViewSerializePatch's transpiler).
+        /// </summary>
+        internal static void EndHostRead(PhotonTransformView ptv, in HostRead read)
+        {
+            SimState st = read.st;
+            if (st == null) return;
+
+            bool firstTakeNow = ptvFirstTake(ptv);
+            bool applied = (read.firstTake && !firstTakeNow) || ptvLastReceiveStamp(ptv) != read.stamp;
+            if (applied)
+            {
+                // NR stored the streamed position as-is. Extrapolating by clock lag makes the
+                // blend target jump around between packets, which every "vibrating / jittery"
+                // report has traced back to. Keep it exactly where the host said it was.
+                st.hostPos = ptvNetPos(ptv);
+                st.hostRot = ptvNetRot(ptv);
+                st.hostVel = ptvRecvVel(ptv);
+                st.hostAngVel = ptvRecvAngVel(ptv);
+                st.hostSleeping = ptvIsSleeping(ptv);
+                st.hostKinematic = ptvKinematic(ptv);
+                // a host teleport bumps the revision; the view's own teleport flag is ALSO set
+                // whenever our copy is 5m+ from the host's, which is not a teleport at all
+                if (!read.firstTake && ptvTeleportRev(ptv) != read.teleportRev)
+                {
+                    st.hostTeleport = true;
+                }
+                ptvTeleport(ptv) = false;
+                st.hasHostState = true;
+                st.lastPacketTime = Time.unscaledTime;
+                PacketsCaptured++;
+                TrajOnPacket(st, read.sentStamp);
+            }
+        }
+
+        // ---- registration ----
+
+        /// <summary>Called for every PhysGrabObject when it awakes (and on grab as a fallback).</summary>
+        internal static SimState TryRegister(PhysGrabObject pgo)
+        {
+            if (!Ready || pgo == null) return null;
+            if (states.TryGetValue(pgo, out SimState existing)) return existing;
+            if (!IsClientInLobby()) return null;
+            if (!CanSimulate(pgo)) return null;
+
+            var ptv = pgo.GetComponent<PhotonTransformView>();
+            var view = pgo.GetComponent<PhotonView>();
+            if (ptv == null || view == null || pgo.rb == null) return null;
+
+            var st = new SimState
+            {
+                pgo = pgo,
+                ptv = ptv,
+                rb = pgo.rb,
+                cart = pgo.GetComponent<PhysGrabCart>(),
+                hinge = pgo.GetComponent<PhysGrabHinge>(),
+                viewId = view.ViewID,
+            };
+            st.isHinge = st.hinge != null;
+            if (st.isHinge)
+            {
+                // the game's own hinge logic runs locally for these (FixedUpdate authority
+                // patch) — the joint must survive but never break on its own; the host
+                // decides breaks and we mirror them
+                st.joint = pgo.GetComponent<HingeJoint>();
+                if (st.joint != null)
+                {
+                    st.joint.breakForce = float.PositiveInfinity;
+                    st.joint.breakTorque = float.PositiveInfinity;
+                }
+                // hinge logic and hinge-point setup are gated on spawned, which vanilla
+                // never sets on clients
+                pgo.spawned = true;
+            }
+            // client-side simulation moves objects with real velocities — continuous
+            // collision detection keeps fast corrections and hard throws from tunneling
+            // through floors (the host never sees it because its copy runs vanilla)
+            if (st.rb.collisionDetectionMode == CollisionDetectionMode.Discrete)
+            {
+                st.rb.collisionDetectionMode = CollisionDetectionMode.ContinuousDynamic;
+            }
+            if (!st.isHinge && st.cart == null && pgo.GetComponentInParent<ItemAttributes>() != null)
+            {
+                // gadgets: the host runs their straightening scripts, we mirror its rotation
+                // gently. Weapons pose themselves (WeaponAuthorityPatch) — a mirror on top
+                // would fight the aim the game is computing right here.
+                st.weapon = pgo.GetComponentInChildren<ItemGun>(true) != null
+                    || pgo.GetComponentInChildren<ItemMelee>(true) != null;
+                st.mirrorHeldRot = !st.weapon;
+                st.droneSelf = pgo.GetComponentInChildren<ItemDrone>(true);
+                if (st.droneSelf != null)
+                {
+                    st.droneToggle = pgo.GetComponentInChildren<ItemToggle>(true);
+                }
+            }
+            if (!st.isHinge)
+            {
+                st.hostDrivenWhy = HostAssist.HostDrivenReason(pgo, st.cart != null);
+                st.hostDriven = st.hostDrivenWhy != null;
+            }
+
+            // seed from whatever the transform view last received, so we have a sane
+            // target even before our own capture sees its first packet
+            if (!ptvFirstTake(ptv))
+            {
+                st.hasHostState = true;
+                st.hostPos = ptvNetPos(ptv);
+                st.hostRot = ptvNetRot(ptv);
+                st.hostVel = ptvRecvVel(ptv);
+                st.hostAngVel = ptvRecvAngVel(ptv);
+                st.hostKinematic = st.rb.isKinematic;
+                st.hostSleeping = ptvIsSleeping(ptv);
+            }
+
+            states[pgo] = st;
+            byPtv[ptv] = st;
+            if (Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"[reg] {pgo.name} (view {st.viewId}, cart={st.cart != null}, seeded={st.hasHostState})");
+            }
+            return st;
+        }
+
+        // ---- state transitions ----
+
+        internal static void StartLocalGrab(PhysGrabObject pgo)
+        {
+            if (!Ready || pgo == null) return;
+
+            SimState st = TryRegister(pgo);
+            if (st == null) return;
+
+            if (!st.localGrab && Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"Local grab authority: {pgo.name}");
+                if (HostAssist.Active && !st.isHinge)
+                {
+                    Plugin.Log.LogInfo(st.hostDriven
+                        ? $"[assist] {pgo.name}: not streamed — the host drives it ({st.hostDrivenWhy})"
+                        : $"[assist] {pgo.name}: streamed to the host");
+                }
+            }
+
+            st.localGrab = true;
+            st.postThrowTimer = 0f;
+            st.desyncTimer = 0f;
+            TrajEnd(st, "grabbed again"); // logs a flight that was still being tracked
+            st.traj?.Reset(); // a new hold starts a new path
+            st.assistTail = 0f;
+            // a drone-driven object stays on vanilla sync even in our hand; the grab is
+            // remembered so we take over the moment the drone lets go or is switched off
+            if (st.droneExempt) return;
+            pgoIsMaster(pgo) = true;
+            EnsureDynamic(st);
+        }
+
+        internal static void EndLocalGrab(PhysGrabObject pgo)
+        {
+            if (!Ready || pgo == null || !states.TryGetValue(pgo, out SimState st) || !st.localGrab) return;
+
+            st.localGrab = false;
+            st.releasedAt = Time.time;
+            st.desyncTimer = 0f;
+            // carts get extra settling time: a rapid release mid-drag otherwise blends the
+            // cart back toward the host's still-trailing copy (visible rollback)
+            // doors get NO throw treatment: throw grace and host-cache seeding both mask
+            // the host's true door rotation (a locked shop door "released" by a player
+            // would reconcile toward our own lie instead of the host's closed state)
+            st.postThrowTimer = st.isHinge ? 0f
+                : (st.cart != null ? Plugin.PostThrowGrace.Value * 2.5f : Plugin.PostThrowGrace.Value);
+            if (!st.isHinge)
+            {
+                st.noSnapTimer = 3f; // bounces diverge between machines: glide, don't teleport
+            }
+            else
+            {
+                st.hingeSyncPause = 1.5f; // let the door you just swung finish before host truth resumes
+            }
+            pgoIsMaster(pgo) = false;
+
+            // NetworkingReworked's release trick (its SyncAfterRelease/OverwriteStoredNetworkData):
+            // overwrite the cached host state with our own release state. The host's
+            // "still in your hand" data is exactly the stale reference that made fresh
+            // throws stop mid-air once corrections resumed — from here on we correct
+            // against our own throw until real packets (which include it) arrive.
+            if (!st.isHinge && st.hasHostState && st.rb != null)
+            {
+                st.hostPos = st.rb.position;
+                st.hostRot = st.rb.rotation;
+                st.hostVel = st.rb.velocity;
+                st.hostAngVel = st.rb.angularVelocity;
+                st.hostSleeping = false;
+                st.hostKinematic = false;
+                st.hostTeleport = false;
+                st.lastPacketTime = Time.unscaledTime;
+            }
+
+            // Trajectory Matching: steer the flight onto the host's path from its first packet
+            // instead of flying blind for the grace period (replaces the grace when it starts)
+            TrajBeginFlight(st);
+            // Host Assist: tell the host we let go (the throw is already applied), then keep
+            // streaming for a moment so its copy glides onto ours instead of jumping
+            HostAssist.ClientSend(st, true);
+            st.assistTail = HostAssist.For(st) && !st.isHinge ? HostAssist.Tail : 0f;
+            st.assistTailAge = 0f;
+            st.assistStill = 0;
+            // let go of something a drone is driving (an active drone): it was never ours,
+            // so there is no throw to protect and no flight to track
+            if (st.droneExempt) ClearTransientSync(st, null);
+
+            // covers the unseen-release path (forced drop, knocked out of hand by hitting
+            // a player): GrabEnded never ran, so the entry our grab patch added is still
+            // in playerGrabbing and this object still reads "held by local player"
+            ScrubStaleLocalGrabber(pgo);
+
+            if (Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"Released grab authority: {pgo.name}");
+            }
+        }
+
+        /// <summary>The upgrade-theft guard. A stale LOCAL entry in playerGrabbing makes
+        /// heldByLocalPlayer stick, and ItemToggle.Update then toggles that item on every
+        /// local E press with OUR photon id — upgrades popped in other players' hands and
+        /// the host credited us. The vanilla janitor (PhysGrabObject.Update) only removes
+        /// entries whose grabber's GLOBAL grabbed flag is false, so the stale entry
+        /// survives as long as we are holding anything else. We put the entry there
+        /// (instant grab), so we take it out.</summary>
+        private static void ScrubStaleLocalGrabber(PhysGrabObject pgo)
+        {
+            if (pgo == null) return;
+            List<PhysGrabber> grabbing = pgo.playerGrabbing;
+            for (int i = grabbing.Count - 1; i >= 0; i--)
+            {
+                PhysGrabber g = grabbing[i];
+                if (g == null || !g.isLocal) continue;
+                if (g.grabbed && grabberObject(g) == pgo) continue;
+                grabbing.RemoveAt(i);
+                if (Plugin.VerboseLogging.Value)
+                {
+                    Plugin.Log.LogInfo($"[stale-grab] {pgo.name}: removed stale local grabber entry (object read as held-by-us)");
+                }
+            }
+        }
+
+        internal static void LocalThrow(PhysGrabObject pgo, PhysGrabber player)
+        {
+            if (pgoThrow == null || pgo == null || player == null) return;
+            if (!states.TryGetValue(pgo, out SimState st) || st.rb == null || st.rb.isKinematic) return;
+            if (st.isHinge) return; // you don't throw a door
+            try
+            {
+                pgoThrow.Invoke(pgo, new object[] { player });
+                if (Plugin.VerboseLogging.Value)
+                {
+                    Plugin.Log.LogInfo($"[throw] {pgo.name} vel={st.rb.velocity.magnitude:F1}");
+                }
+            }
+            catch (Exception e)
+            {
+                if (Plugin.VerboseLogging.Value) Plugin.Log.LogWarning($"Local throw failed: {e.Message}");
+            }
+        }
+
+        /// <summary>Points the grab controller's orientation target at the host's
+        /// (already straightened) rotation — the vectors are camera-relative, exactly
+        /// how PhysGrabObject.TurnXYZ writes them for item scripts.</summary>
+        private static void ApplyHeldOrientation(SimState st, PhysGrabber grabber)
+        {
+            if (!st.mirrorHeldRot || !st.hasHostState) return;
+            // gentle host mirror — soft enough that the ping-late target can't telegraph
+            // as glitching
+            if (grabber.playerAvatar == null || grabber.playerAvatar.localCamera == null) return;
+            Transform cam = grabber.playerAvatar.localCamera.GetOverrideTransform();
+            if (cam == null) return;
+            grabber.cameraRelativeGrabbedForward = cam.InverseTransformDirection(st.hostRot * Vector3.forward);
+            grabber.cameraRelativeGrabbedUp = cam.InverseTransformDirection(st.hostRot * Vector3.up);
+        }
+
+        /// <summary>Frame-rate refresh of held-tool orientation targets: the grabber's
+        /// beam update re-captures the target from the current rotation each frame, so a
+        /// physics-tick-only write loses whole frames to the re-capture. Item scripts
+        /// win this race by writing every Update — so do we.</summary>
+        internal static void MirrorHeldOrientationTargets()
+        {
+            if (states.Count == 0) return;
+            foreach (SimState st in states.Values)
+            {
+                if (!st.localGrab) continue;
+                if (!st.mirrorHeldRot) continue;
+                PhysGrabber grabber = GetLocalGrabber(st);
+                if (grabber == null || grabber.isRotating) continue;
+                ApplyHeldOrientation(st, grabber);
+            }
+        }
+
+        private static void EnsureDynamic(SimState st)
+        {
+            if (st.rb == null) return;
+            if (st.rb.isKinematic) st.rb.isKinematic = false;
+            if (st.rb.IsSleeping()) st.rb.WakeUp();
+        }
+
+        internal static void TickKinematicTimer(PhotonTransformView ptv)
+        {
+            // replicate the tail of PhotonTransformView.Update that we skip while suppressed
+            if (ptvKinForcedTimer(ptv) > 0f)
+            {
+                ptvKinForcedTimer(ptv) = Mathf.Max(0f, ptvKinForcedTimer(ptv) - Time.deltaTime);
+            }
+        }
+
+        // ---- per-physics-tick driver ----
+
+        private static int tickCounter;
+        private static int cargoStagger;
+
+        // ---- magnet drones: the drone provides the motion, so the host owns the target ----
+        private static AccessTools.FieldRef<ItemDrone, bool> droneMagnetActive;
+        private static AccessTools.FieldRef<ItemDrone, PhysGrabObject> droneMagnetTarget;
+        private static bool droneAccessorsTried;
+        internal static ItemDrone[] cachedDrones;
+        private static readonly Dictionary<PhysGrabObject, ItemDrone> droneTargetMap =
+            new Dictionary<PhysGrabObject, ItemDrone>();
+
+        internal static void EnsureDroneAccessors()
+        {
+            if (droneAccessorsTried) return;
+            droneAccessorsTried = true;
+            try
+            {
+                droneMagnetActive = AccessTools.FieldRefAccess<ItemDrone, bool>("magnetActive");
+                droneMagnetTarget = AccessTools.FieldRefAccess<ItemDrone, PhysGrabObject>("magnetTargetPhysGrabObject");
+            }
+            catch (Exception e)
+            {
+                Plugin.Log.LogWarning($"Drone handoff disabled (game internals changed): {e.Message}");
+            }
+        }
+
+        private static void RebuildDroneTargets()
+        {
+            droneTargetMap.Clear();
+            if (droneMagnetActive == null || cachedDrones == null) return;
+            foreach (ItemDrone d in cachedDrones)
+            {
+                if (d == null || !droneMagnetActive(d)) continue;
+                PhysGrabObject t = droneMagnetTarget(d);
+                if (t != null) droneTargetMap[t] = d;
+            }
+        }
+        private static bool wasClientInLobby;
+        private static float lastTickFixedTime = -1f;
+        private static bool tickMarker;
+
+        internal static void Tick()
+        {
+            if (!Ready) return;
+            // driven from both a Harmony hook and the plugin component (whichever works
+            // in this setup) — run at most once per physics step
+            if (Time.fixedTime == lastTickFixedTime) return;
+            lastTickFixedTime = Time.fixedTime;
+            if (!tickMarker)
+            {
+                tickMarker = true;
+                Plugin.Log.LogInfo("[driver] physics tick loop running");
+            }
+            SweepHandedBack();
+            HostAssist.HostTick(); // the one thing the mod does while hosting (opt-in)
+
+            bool clientInLobby = IsClientInLobby();
+            if (clientInLobby != wasClientInLobby)
+            {
+                wasClientInLobby = clientInLobby;
+                if (Plugin.VerboseLogging.Value)
+                {
+                    Plugin.Log.LogInfo(clientInLobby
+                        ? "[mode] CLIENT — simulation active (we are not the host)"
+                        : "[mode] simulation idle (hosting, singleplayer or no lobby)");
+                }
+            }
+
+            if (states.Count == 0) return;
+            tickCounter++;
+            RebuildDroneTargets();
+
+            tickBuffer.Clear();
+            tickBuffer.AddRange(states.Values);
+
+            // cargo inside a cart the local player is dragging must ride the cart in pure
+            // local physics — blending it toward the host's (lagging) cargo positions drags
+            // the cart backwards like an anchor and slams loot through the cart walls
+            foreach (SimState st in tickBuffer)
+            {
+                if (st.cart == null || st.pgo == null || st.rb == null) continue;
+                // NetworkingReworked's cargo rule (broader than ours was): cargo rides in
+                // pure local physics whenever the cart is in use by ANYONE or still
+                // rolling — blending cargo toward 10Hz host positions inside a smoothly
+                // moving cart is the "loot vibrates in the cart" rattle
+                bool cartInUse = st.localGrab
+                    || st.pgo.playerGrabbing.Count > 0
+                    || st.rb.velocity.sqrMagnitude > 0.25f;
+                // hysteresis: riding must not flap with stop-start pushing — every
+                // riding<->synced transition jostles the load ("loot slides off")
+                if (cartInUse)
+                {
+                    st.rideHoldTimer = 1.5f;
+                }
+                else if (st.rideHoldTimer > 0f)
+                {
+                    st.rideHoldTimer -= Time.fixedDeltaTime;
+                }
+                else
+                {
+                    continue;
+                }
+                List<PhysGrabObject> items = cartItems(st.cart);
+                if (items == null) continue;
+                for (int i = 0; i < items.Count; i++)
+                {
+                    if (items[i] != null && states.TryGetValue(items[i], out SimState rider))
+                    {
+                        rider.ridingTick = tickCounter;
+                    }
+                }
+            }
+
+            foreach (SimState st in tickBuffer)
+            {
+                if (st.pgo == null || st.rb == null || st.ptv == null)
+                {
+                    HardRemove(st);
+                    continue;
+                }
+
+                if (st.viewId == 0)
+                {
+                    var view = st.pgo.GetComponent<PhotonView>();
+                    if (view != null && view.ViewID != 0)
+                    {
+                        st.viewId = view.ViewID;
+                    }
+                }
+
+                // left the lobby / became host / went singleplayer: give everything back
+                if (!clientInLobby)
+                {
+                    Restore(st);
+                    continue;
+                }
+
+                // "ownership follows whoever provides the motion": a magnet drone drives
+                // this object, so the host owns it — UNLESS the local player is also
+                // holding it (that is the feather drone's whole purpose: helping a player
+                // carry heavy loot). The player's grab always wins; 1.2.7 exempted held
+                // objects too and the fight caused an infinite exempt/re-register flap.
+                // An ACTIVE drone is different (1.5.4): everything that moves it is master-only
+                // (ItemDrone.FixedUpdate), so it is the host's whether or not we hold it — a
+                // switched-on drone simulated in the hand sat still while the host's copy
+                // flew to its target.
+                bool droneOnly = (st.droneSelf != null && st.droneToggle != null && st.droneToggle.toggleState)
+                    || (!st.localGrab && droneTargetMap.Count > 0 && droneTargetMap.ContainsKey(st.pgo));
+                if (droneOnly != st.droneExempt)
+                {
+                    st.droneExempt = droneOnly;
+                    // Nothing ticks while exempt, so every timer and the throw tracker would
+                    // freeze mid-state and resume, stale, at hand-back. That was the "drone
+                    // lets go and the item falls through the floor" bug: an item thrown to a
+                    // waiting drone was taken one tick after release with its flight still
+                    // being tracked; seconds later the tracker woke up, compared the host's
+                    // packet with a path recorded before the drone carried the item away, and
+                    // shoved it 2.1m — through the floor — while writing velocities to a body
+                    // vanilla sync had left kinematic.
+                    ClearTransientSync(st, droneOnly ? "a drone took it" : null);
+                    if (droneOnly)
+                    {
+                        // hand to vanilla WITHOUT unregistering (Restore() fully removes
+                        // the state — that removal was the 969-cycle flap in one session)
+                        SeedPtvFields(st);
+                    }
+                    if (Plugin.VerboseLogging.Value)
+                    {
+                        Plugin.Log.LogInfo(droneOnly
+                            ? $"[drone] {st.pgo.name}: drone-driven — host drives it until released"
+                            : $"[drone] {st.pgo.name}: released by the drone — simulated again");
+                    }
+                }
+                if (st.droneExempt)
+                {
+                    pgoIsMaster(st.pgo) = false; // a grab during the exemption must not claim it
+                    // TickHeld is not watching this one: catch a release we never saw (forced
+                    // drop, death) so no stale "held by us" entry outlives the grab
+                    if (st.localGrab && GetLocalGrabber(st) == null) st.localGrab = false;
+                    if (!st.localGrab) ScrubStaleLocalGrabber(st.pgo);
+                    continue;
+                }
+
+                if (st.localGrab)
+                {
+                    TickHeld(st);
+                }
+                else
+                {
+                    // safety net for any leftover path that strands our instant-grab
+                    // entry — a genuine local grab always has localGrab set by the
+                    // GrabStarted postfix before this tick can run
+                    ScrubStaleLocalGrabber(st.pgo);
+                    TickShadow(st);
+                }
+            }
+        }
+
+        /// <summary>Forget everything that describes a moment in progress — throw grace, snap
+        /// guards, the tracked flight, the Host Assist tail — when an object changes hands
+        /// between our simulation and vanilla sync.</summary>
+        private static void ClearTransientSync(SimState st, string flightEndedBecause)
+        {
+            if (flightEndedBecause != null) TrajEnd(st, flightEndedBecause);
+            st.traj?.Reset();
+            st.postThrowTimer = 0f;
+            st.postThrowRamp = 0f;
+            st.noSnapTimer = 0f;
+            st.assistTail = 0f;
+            st.desyncTimer = 0f;
+            st.farTimer = 0f;
+            st.wasRiding = false;
+            st.hostTeleport = false;
+        }
+
+        /// <summary>Local player is holding this object: full local authority, but keep both
+        /// players' views bounded — the host's copy can snag on geometry and diverge.</summary>
+        private static void TickHeld(SimState st)
+        {
+            PhysGrabber grabber = GetLocalGrabber(st);
+            if (!pgoIsActive(st.pgo) || grabber == null)
+            {
+                // release we did not see through GrabEnded (forced drop, tumble, death, extraction)
+                EndLocalGrab(st.pgo);
+                return;
+            }
+
+            pgoIsMaster(st.pgo) = true; // keep asserting; game code can rewrite it
+            EnsureDynamic(st);
+
+            if (st.isHinge)
+            {
+                CheckHingeBroken(st);
+                return; // joint-anchored: grab forces + the game's own hinge logic handle it
+            }
+
+            TrajRecordHeld(st);
+            // Host Assist: stream what we hold at the game's own 25Hz (every other tick)
+            if ((tickCounter & 1) == 0) HostAssist.ClientSend(st, false);
+
+            if (st.cart != null)
+            {
+                DriveHeldCart(st, grabber);
+            }
+
+            // a magnet drone is helping carry this held object: replicate the feather
+            // physics the host applies to its copy (ItemDroneFeather's target values) —
+            // otherwise we simulate it at full weight and it feels immovable
+            if (droneTargetMap.Count > 0 && droneTargetMap.TryGetValue(st.pgo, out ItemDrone helper)
+                && helper != null && helper.GetComponent<ItemDroneFeather>() != null)
+            {
+                st.pgo.OverrideMass(0.5f);
+                st.pgo.OverrideDrag(1f);
+                st.pgo.OverrideAngularDrag(5f);
+            }
+
+            // NOTE: hostKinematic is deliberately ignored while held — the game force-flags
+            // grabbed/hinged objects "kinematic" for clients (KinematicClientForce), which
+            // says nothing about the host rigidbody's real state.
+            if (!st.hasHostState)
+            {
+                DebugHeld(st, grabber, -1f, 0f);
+                return;
+            }
+            st.hostTeleport = false; // we own it; ignore teleports until release
+
+            // A host that has gone silent everywhere cannot acknowledge our motion —
+            // correcting toward its frozen last-known position just pins the object in
+            // place (the "everything was stuck" freeze when the host hangs or quits).
+            if (HostStalled)
+            {
+                st.desyncTimer = 0f;
+                DebugHeld(st, grabber, -1f, st.rb.velocity.magnitude);
+                return;
+            }
+
+            // HELD OBJECTS — NetworkingReworked's rule: while you are holding something it
+            // is yours completely, and the network does not touch it. Its passive sync
+            // simply skipped anything locally grabbed. Everything we added on top of that
+            // misfired in real lobbies: the drift nudge fought the natural ping-trail and
+            // became a brake (the "ultra slow cart"), and the wedge-snap mistook a paused
+            // cart's normal trail for a stuck object and teleported it out of your hands.
+            // Both are gone. What remains is one genuine last resort — if the host's copy
+            // is hopelessly far away for over a second, it is snagged on something and
+            // holding on achieves nothing, so give it back.
+            float speed = st.rb.velocity.magnitude;
+            float drift = Vector3.Distance(st.rb.position, st.hostPos);
+            float handbackAt = Plugin.HeldDriftHandbackAt.Value + speed * 0.4f;
+            if (st.cart != null) handbackAt *= 1.5f;
+            if (drift > handbackAt)
+            {
+                st.desyncTimer += Time.fixedDeltaTime;
+                if (st.desyncTimer > (st.cart != null ? 1.2f : 0.6f))
+                {
+                    ForceHandback(st);
+                    return;
+                }
+            }
+            else
+            {
+                st.desyncTimer = 0f;
+            }
+
+            // Trajectory Matching: nudge out only the part of a held cart's disagreement that
+            // is NOT the normal ping trail
+            TrajHeldCart(st);
+
+            // gadgets without local orientation logic: the host runs their straightening
+            // scripts on our behalf. To make the tool STAY straight we do what the game's
+            // own item scripts do while imposing orientation (see ItemGun.UpdateMaster):
+            // neutralize the default grab torque — whose different target orientation is
+            // what shoved the tool off-straight — heavily damp rotation, then steer
+            // angular velocity toward the host's rotation, unopposed. Manual rotation
+            // (rotate key) gets priority, exactly like the game's gun code does it.
+            // Retarget the game's own grab-orientation controller instead of steering the
+            // rigidbody: the grab code re-captures its target from the object's CURRENT
+            // rotation every frame (PhysGrabber beam update) and overwrites outside
+            // angular writes — which is why three rigidbody-steering attempts all felt
+            // "weak". Writing the camera-relative target vectors (the same channel item
+            // scripts use via TurnXYZ) makes the game's own tuned torque do the
+            // straightening at native strength. Also written per-frame from SimDriver.
+            if (!grabber.isRotating)
+            {
+                ApplyHeldOrientation(st, grabber);
+            }
+
+            DebugHeld(st, grabber, drift, speed);
+        }
+
+        private static void DebugHeld(SimState st, PhysGrabber grabber, float drift, float speed)
+        {
+            if (!Plugin.VerboseLogging.Value) return;
+            st.debugTimer -= Time.fixedDeltaTime;
+            if (st.debugTimer > 0f) return;
+            st.debugTimer = 1f;
+            float packetAge = st.hasHostState ? Time.unscaledTime - st.lastPacketTime : -1f;
+            Plugin.Log.LogInfo(
+                $"[held] {st.pgo.name}: speed={speed:F1} drift={drift:F1} hostState={st.hasHostState} " +
+                $"packetAge={packetAge:F1}s hostKin={st.hostKinematic} hostSleep={st.hostSleeping} " +
+                $"steered={grabber.physGrabForcesDisabledTimer > 0f}");
+        }
+
+        /// <summary>
+        /// The game moves handle-held carts by directly steering their velocity toward a
+        /// follow point behind the player — but only under host-side conditions (cartActive,
+        /// grab-area lists) that are unreliable on clients. If the game's own steering didn't
+        /// run this tick (its marker is the disabled-grab-forces timer), run the same drive
+        /// ourselves so the cart always follows the local player at full speed.
+        /// </summary>
+        private static void DriveHeldCart(SimState st, PhysGrabber grabber)
+        {
+            if (grabber.physGrabForcesDisabledTimer > 0f) return; // vanilla steer is active
+
+            // the game only steers HANDLE grabs — for body grabs ("weak" drag mode) the
+            // host uses plain grab forces, and steering locally would desync us hard
+            PhysGrabObjectGrabArea area = cartGrabArea(st.cart);
+            if (area == null || !area.listOfAllGrabbers.Contains(grabber)) return;
+
+            PlayerAvatar avatar = grabber.playerAvatar;
+            if (avatar == null || PlayerController.instance == null) return;
+
+            // no steering while the player stands inside the cart basket (vanilla rule)
+            Transform inCart = cartInCart(st.cart);
+            BoxCollider basket = inCart != null ? inCart.GetComponent<BoxCollider>() : null;
+            Vector3 playerPos = avatar.transform.position + Vector3.up * 0.25f;
+            if (basket != null && Vector3.Distance(basket.ClosestPoint(playerPos), playerPos) < 0.01f) return;
+
+            grabber.OverridePhysGrabForcesDisable(0.1f);
+
+            bool sprinting = avatarSprinting(avatar);
+            float followMin = st.cart.isSmallCart ? 1.5f : 2f;
+            float followMax = st.cart.isSmallCart ? 2f : 2.5f;
+            float speedCap = sprinting ? 7f : 5f;
+            bool movingForward = Vector3.Dot(PlayerController.instance.rb.velocity, st.pgo.transform.forward) > 0f;
+            if (sprinting && movingForward)
+            {
+                followMin = 3f;
+                followMax = 4f;
+            }
+
+            float t = Mathf.Clamp01(Vector3.Dot(st.rb.velocity, grabber.transform.forward) / speedCap);
+            float followDist = Mathf.Lerp(followMin, followMax, t);
+            Vector3 behind = grabber.transform.rotation * Vector3.back;
+            Vector3 followPos = avatar.transform.position - behind * followDist;
+
+            float pull = Mathf.Clamp01(Vector3.Distance(st.pgo.transform.position, followPos));
+            Vector3 targetVel = Vector3.ClampMagnitude((followPos - st.pgo.transform.position).normalized * 5f * pull, 5f);
+            float keepY = st.rb.velocity.y;
+            Vector3 vel = Vector3.MoveTowards(st.rb.velocity, targetVel, pull * 2f);
+            vel.y = keepY;
+            st.rb.velocity = Vector3.ClampMagnitude(vel, 5f);
+
+            // turn the cart to face away from the player, like the game's steering does
+            Quaternion faceAway = Quaternion.Euler(0f, Quaternion.LookRotation(grabber.transform.position - st.pgo.transform.position, Vector3.up).eulerAngles.y + 180f, 0f);
+            Quaternion flatRot = Quaternion.Euler(0f, st.rb.rotation.eulerAngles.y, 0f);
+            (faceAway * Quaternion.Inverse(flatRot)).ToAngleAxis(out float angle, out Vector3 axis);
+            if (angle > 180f) angle -= 360f;
+            float turnRate = Mathf.Clamp(Mathf.Clamp(Mathf.Abs(angle) / 180f, 0.2f, 1f) * 20f, 0f, 4f);
+            Vector3 targetAngVel = Vector3.ClampMagnitude(Mathf.Deg2Rad * angle * axis.normalized * turnRate, 4f);
+            st.rb.angularVelocity = Vector3.ClampMagnitude(
+                Vector3.MoveTowards(st.rb.angularVelocity, targetAngVel, turnRate), 4f);
+        }
+
+        /// <summary>Nobody local holds this object: run it in local physics, but blend it
+        /// continuously toward the host's streamed state so desync can never accumulate.
+        /// For a cart, every correction is carried through to its cargo (see CarryCargo).</summary>
+        private static void TickShadow(SimState st)
+        {
+            if (st.cart == null)
+            {
+                TickShadowInner(st);
+                return;
+            }
+            Vector3 cartPosBefore = st.rb.position;
+            Quaternion cartRotBefore = st.rb.rotation;
+            TickShadowInner(st);
+            CarryCargo(st, cartPosBefore, cartRotBefore);
+        }
+
+        /// <summary>
+        /// A basket and its contents move together — so when the network moves the basket,
+        /// it has to move the contents too.
+        ///
+        /// This is the "loot pops out and sticks to the side of the cart" bug. Cargo riding
+        /// in a cart is deliberately given NO sync (NetworkingReworked's rule — correcting it
+        /// individually is what made loot rattle). But the CART itself is still corrected, and
+        /// those corrections are direct rb.position writes, which teleport straight through
+        /// colliders. So whenever someone else pushes the cart, our copy of the basket slides
+        /// — sometimes metres, on a snap — while the loot is pinned in local physics: the cart
+        /// passes THROUGH its own cargo and leaves it outside, wedged against the outer wall.
+        ///
+        /// Applying the cart's exact movement to everything in it keeps the load in the basket
+        /// without giving cargo a sync target of its own (which is the thing that rattles).
+        /// </summary>
+        private static void CarryCargo(SimState cartState, Vector3 oldPos, Quaternion oldRot)
+        {
+            if (cartState.cart == null || cartState.rb == null) return;
+
+            Vector3 newPos = cartState.rb.position;
+            Quaternion newRot = cartState.rb.rotation;
+            Vector3 deltaPos = newPos - oldPos;
+            if (deltaPos.sqrMagnitude < 1e-8f && Quaternion.Angle(oldRot, newRot) < 0.01f) return;
+            Quaternion deltaRot = newRot * Quaternion.Inverse(oldRot);
+
+            List<PhysGrabObject> items = cartItems(cartState.cart);
+            if (items == null) return;
+            for (int i = 0; i < items.Count; i++)
+            {
+                PhysGrabObject item = items[i];
+                if (item == null || !states.TryGetValue(item, out SimState rider)) continue;
+                if (rider == cartState || rider.rb == null) continue;
+                // ONLY carry cargo we are deliberately not syncing this tick. Cargo that is
+                // running its own correction does not need the ride, and giving it both would
+                // move it twice per tick — the cart's delta shoving it off its own target and
+                // its own lerp dragging it back, which is precisely the rattle the riding rule
+                // exists to prevent. Parked-cart cargo converges on its own.
+                if (rider.ridingTick != tickCounter) continue;
+                // a player is holding it, or the host owns it outright — not ours to move
+                if (rider.localGrab || rider.droneExempt || rider.rb.isKinematic) continue;
+                if (!pgoIsActive(item)) continue;
+
+                rider.rb.position = newPos + deltaRot * (rider.rb.position - oldPos);
+                rider.rb.rotation = deltaRot * rider.rb.rotation;
+            }
+        }
+
+        /// <summary>
+        /// Host Assist, after we let go: keep streaming — and keep our copy in pure local
+        /// physics — until it has come to REST, so the host's copy lands where ours did.
+        ///
+        /// Up to 1.6.0 the tail was a fixed 0.4s. A dropped object is usually still in the
+        /// air then: the host's copy finished the fall on its own, bounced its own way, and
+        /// when our grace ended our copy was pulled over to wherever the host's had stopped.
+        /// Barely visible on a compact valuable; on a bat or a shotgun lying at a different
+        /// angle it is the "glitches when dropped" of the first Instant Weapons session.
+        /// </summary>
+        private static void TickAssistTail(SimState st)
+        {
+            st.assistTail -= Time.fixedDeltaTime;
+            st.assistTailAge += Time.fixedDeltaTime;
+            bool moving = st.rb.velocity.sqrMagnitude > 0.01f || st.rb.angularVelocity.sqrMagnitude > 0.04f;
+            st.assistStill = moving ? 0 : st.assistStill + 1;
+
+            string ended = null;
+            if (!HostAssist.For(st)) ended = "assist off";
+            else if (st.ridingTick == tickCounter) ended = "landed in a cart";
+            // (not in the first half second: packets sent while the host still saw the object
+            // in our hand are flagged kinematic and arrive after we have let go)
+            else if (st.hostKinematic && st.assistTailAge > 0.5f) ended = "the host took it";
+            else if (HeldByAnotherPlayer(st)) ended = "someone else grabbed it";
+            else if (st.assistStill >= 15) ended = "at rest";
+            else if (st.assistTail <= 0f) ended = "time limit";
+
+            if (ended == null)
+            {
+                if ((tickCounter & 1) == 0) HostAssist.ClientSend(st, false);
+                // the grace below ("pure local physics") lasts exactly as long as the tail
+                if (st.postThrowTimer < 0.1f) st.postThrowTimer = 0.1f;
+                return;
+            }
+
+            st.assistTail = 0f;
+            if (Plugin.VerboseLogging.Value && st.hasHostState)
+            {
+                // what the host had when we stopped — it keeps closing in for a moment after
+                // this, so a small figure here means nothing is left to settle
+                Plugin.Log.LogInfo($"[assist] {st.pgo.name}: release followed for {st.assistTailAge:F2}s ({ended}) — " +
+                    $"host copy {Vector3.Distance(st.rb.position, st.hostPos):F2}m / " +
+                    $"{Quaternion.Angle(st.rb.rotation, st.hostRot):F0} deg away, packet {Time.unscaledTime - st.lastPacketTime:F2}s old");
+            }
+        }
+
+        private static bool HeldByAnotherPlayer(SimState st)
+        {
+            List<PhysGrabber> grabbing = st.pgo.playerGrabbing;
+            for (int i = 0; i < grabbing.Count; i++)
+            {
+                if (grabbing[i] != null && !grabbing[i].isLocal) return true;
+            }
+            return false;
+        }
+
+        private static void TickShadowInner(SimState st)
+        {
+            pgoIsMaster(st.pgo) = false;
+
+            // deactivated objects sit kinematic in limbo (extracted/destroyed) — hands off
+            if (!pgoIsActive(st.pgo)) return;
+
+            if (st.assistTail > 0f) TickAssistTail(st);
+
+            // CART CARGO — the original NetworkingReworked's model (credit: readthisifbad).
+            // While the cart is in use, cargo gets NO sync of any kind: it simply rides in
+            // local physics, in a local basket, with local collisions. Every attempt to
+            // correct it mid-haul has failed differently — blending rattles it, world-space
+            // pulls shove it out (the host's cart trails by the ping), frame-relative pulls
+            // fight the basket's own collisions. The basket already holds the loot; the
+            // network does not need to. Divergence is reconciled once the haul ends.
+            if (st.ridingTick == tickCounter)
+            {
+                if (st.rb.isKinematic) st.rb.isKinematic = false;
+                st.hostTeleport = false;
+                st.wasRiding = true;
+                TrajEnd(st, "landed in a cart"); // cargo rules own it now
+                return;
+            }
+            if (st.wasRiding)
+            {
+                // haul over: NR re-synced the cart first, then its cargo staggered a few
+                // hundredths apart, so the load settles item by item instead of the whole
+                // pile jerking at once. Our correction ramp does the same job smoothly.
+                st.wasRiding = false;
+                st.postThrowRamp = 0.5f + (cargoStagger++ & 7) * 0.05f;
+            }
+
+            if (!st.hasHostState) return;
+
+            // world-wide packet silence (host stalled/leaving): blending toward the frozen
+            // last-known state pins every object the player bumps — pure local physics
+            // until data flows again
+            if (HostStalled) return;
+
+            // the host has this object pooled/deactivated (parked off-map): syncing to it
+            // would fling our copy into the sky and then snap it back, over and over
+            if ((st.hostPos - DisabledPosition()).sqrMagnitude < 25f) return;
+
+            if (st.postThrowTimer > 0f)
+            {
+                st.postThrowTimer -= Time.fixedDeltaTime;
+                if (st.postThrowTimer <= 0f)
+                {
+                    st.postThrowRamp = 0.4f; // hand control back gradually, not with a brake
+                }
+            }
+            else if (st.postThrowRamp > 0f)
+            {
+                st.postThrowRamp -= Time.fixedDeltaTime;
+            }
+            if (st.noSnapTimer > 0f)
+            {
+                st.noSnapTimer -= Time.fixedDeltaTime;
+            }
+
+            if (st.hostTeleport)
+            {
+                st.hostTeleport = false;
+                // Some objects (death heads especially) get the teleport flag set by the
+                // host constantly. When our copy is already there it is a pointless
+                // physics write and thousands of log lines — one session logged 3710 of
+                // them for a single corpse head. Only act on real teleports.
+                if ((st.rb.position - st.hostPos).sqrMagnitude > 0.01f)
+                {
+                    Snap(st, "host teleported it");
+                    return;
+                }
+            }
+
+            // Trajectory Matching: a tracked flight is steered onto the host's path against
+            // our own recorded past, which the plain sync below cannot do
+            if (TrajStep(st)) return;
+
+            // A fresh local throw: the host still thinks the object is in our hand, so
+            // ANY correction drags the flight backward toward stale data ("moves so
+            // weirdly"). Pure local physics for the grace period (config PostThrowGrace);
+            // the regular glide reconciles whatever small difference remains afterwards.
+            if (st.postThrowTimer > 0f) return;
+
+            // the host holds it kinematic (another player carrying it, a system owning it):
+            // follow its state exactly, no physics of our own
+            if (st.hostKinematic && !st.isHinge)
+            {
+                if (!st.rb.isKinematic) st.rb.isKinematic = true;
+                st.rb.MovePosition(st.hostPos);
+                st.rb.MoveRotation(st.hostRot);
+                return;
+            }
+            if (st.rb.isKinematic) st.rb.isKinematic = false;
+
+            // doors/cabinets: anchored by their local joint and driven by the game's own
+            // (locally running) hinge logic — we only nudge the swing angle toward the host
+            if (st.isHinge)
+            {
+                CheckHingeBroken(st);
+                // while the local player (or something they hold/push) is shoving this door,
+                // the host's copy is still closed — syncing toward it fights the push
+                // ("delayed and buggy, eventually opens"); go fully local briefly instead
+                if (st.localPushTimer > 0f)
+                {
+                    st.localPushTimer -= Time.fixedDeltaTime;
+                    st.hingeSyncPause = 1f; // and let it settle after the push ends
+                    return;
+                }
+                if (st.hingeSyncPause > 0f)
+                {
+                    st.hingeSyncPause -= Time.fixedDeltaTime;
+                    // still swinging from OUR interaction: local physics finishes the swing
+                    if (st.rb.angularVelocity.sqrMagnitude > 0.25f) return;
+                }
+                // otherwise the host's door angle is continuously authoritative. The
+                // game's own auto-close logic runs locally too — an unsynced "local
+                // motion owns the door" rule let that spring quietly fight host truth
+                // (open cupboards self-closing = desync). Only OUR interactions above
+                // may interrupt the sync, never the door's own spring.
+                // joint-friendly host authority: steer ANGULAR VELOCITY to close the
+                // angle gap. MoveRotation forcing fought the hinge joint solver and the
+                // local closing spring 50x/s — that was the door jitter. The deadband
+                // keeps agreement calm; the joint itself keeps the swing on its arc.
+                (st.hostRot * Quaternion.Inverse(st.rb.rotation)).ToAngleAxis(out float hAng, out Vector3 hAxis);
+                if (hAng > 180f) hAng -= 360f;
+                if (Mathf.Abs(hAng) > 1.5f && !float.IsInfinity(hAxis.x))
+                {
+                    Vector3 targetW = Vector3.ClampMagnitude(Mathf.Deg2Rad * hAng * hAxis.normalized * 4f, 6f);
+                    st.rb.angularVelocity = Vector3.Lerp(st.rb.angularVelocity, targetW, 0.35f);
+                }
+                return;
+            }
+
+            // both copies at rest and already agreeing: leave it alone so it can sleep
+            if (st.hostSleeping
+                && (st.rb.position - st.hostPos).sqrMagnitude < 0.0025f
+                && Quaternion.Angle(st.rb.rotation, st.hostRot) < 3f)
+            {
+                if (!st.rb.IsSleeping())
+                {
+                    st.rb.velocity = Vector3.zero;
+                    st.rb.angularVelocity = Vector3.zero;
+                    st.rb.Sleep();
+                }
+                return;
+            }
+            // asleep somewhere the host does not have it: it would rest there forever,
+            // immune to the blend below — wake it so it can be brought home
+            if (st.rb.IsSleeping()) st.rb.WakeUp();
+
+            float dist = Vector3.Distance(st.rb.position, st.hostPos);
+            if (dist > Plugin.SnapDistance.Value && st.postThrowRamp <= 0f && st.noSnapTimer <= 0f)
+            {
+                Snap(st, "beyond snap distance");
+                return;
+            }
+
+            // convergence backstop: if the blend hasn't brought an object home after five
+            // seconds (wedged behind geometry, bad luck), teleport it. The promise is that
+            // loot always ends up where the host sees it.
+            //
+            // ROTATION counts as "desynced" for CARTS ONLY. 1.2.15 added it for the
+            // right reason (a cart parked in the correct spot but turned 90 degrees is
+            // genuinely wrong) but applied it to everything, and that was a bad trade for
+            // loose props: a mug or a weapon resting at a different angle than the host's
+            // copy is normal settling, and teleporting it is far worse than the
+            // disagreement. It fired constantly on objects that were ALREADY in the right
+            // place — one session logged 52 of these at distances of 0.1-1.3m (vs zero
+            // before 1.2.15), popping loot through shelves and out of players' hands.
+            bool rotationCounts = st.cart != null;
+            float rotErr = rotationCounts ? Quaternion.Angle(st.rb.rotation, st.hostRot) : 0f;
+            if (dist > 1.5f || (rotationCounts && rotErr > 30f))
+            {
+                st.farTimer += Time.fixedDeltaTime;
+                if (st.farTimer > 5f && st.noSnapTimer <= 0f && st.postThrowRamp <= 0f)
+                {
+                    st.farTimer = 0f;
+                    Snap(st, "stuck away from host position too long");
+                    return;
+                }
+            }
+            else if (dist < 0.75f && (!rotationCounts || rotErr < 10f))
+            {
+                st.farTimer = 0f;
+            }
+
+            // ---- passive sync: the original NetworkingReworked's, kept as it was ----
+            // Position, rotation, velocity and angular velocity are each eased toward the
+            // host's last streamed state every physics tick. That is the whole algorithm.
+            // Everything we layered on top of it through 1.2.x — extrapolating the target
+            // by ping, idle detection, deadbands, velocity steering — each fixed one
+            // symptom and caused another, because they all made the target MOVE between
+            // packets. A still target converges smoothly and cannot fight the physics.
+            float a = Mathf.Clamp01(Plugin.PassiveSyncStrength.Value);
+            if (st.postThrowRamp > 0f)
+            {
+                // ease back in after a throw or a cart unload instead of grabbing hold
+                a *= 1f - Mathf.Clamp01(st.postThrowRamp / 0.5f);
+            }
+            st.rb.position = Vector3.Lerp(st.rb.position, st.hostPos, a);
+            st.rb.rotation = Quaternion.Slerp(st.rb.rotation, st.hostRot, a);
+            st.rb.velocity = Vector3.Lerp(st.rb.velocity, st.hostVel, a);
+            st.rb.angularVelocity = Vector3.Lerp(st.rb.angularVelocity, st.hostAngVel, a);
+        }
+
+        /// <summary>Called from the hinge collision hook: if the local player or something
+        /// they control is physically pushing this door, let it go fully local briefly.</summary>
+        internal static void NotifyHingePushed(PhysGrabHinge hinge, Collision collision)
+        {
+            if (hinge == null || collision == null) return;
+            PhysGrabObject pgo = hinge.GetComponent<PhysGrabObject>();
+            if (pgo == null || !states.TryGetValue(pgo, out SimState st) || !st.isHinge) return;
+
+            bool localPush = false;
+            if (collision.gameObject.CompareTag("Player") && PlayerController.instance != null
+                && Vector3.Distance(collision.transform.position, PlayerController.instance.transform.position) < 3f)
+            {
+                localPush = true; // the local player's body (remote avatars are further away)
+            }
+            else if (collision.rigidbody != null)
+            {
+                PhysGrabObject otherPgo = collision.rigidbody.GetComponent<PhysGrabObject>();
+                if (otherPgo != null && states.TryGetValue(otherPgo, out SimState os)
+                    && (os.localGrab || os.ridingTick >= tickCounter - 2))
+                {
+                    localPush = true; // a locally-held object or cargo of a locally-held cart
+                }
+            }
+            if (localPush)
+            {
+                st.localPushTimer = 0.75f;
+            }
+        }
+
+        // PhysGrabHinge.closed: while true, the hinge logic pins the door to its rest pose every
+        // tick. Only the host's Open/CloseImpulseRPC ever change it — the local OpenImpulse()
+        // our transpiled hinge logic calls is a no-op on a client — so a shut door stayed
+        // pinned for a full round trip after you pulled it ("first doors are buggy": quick
+        // tugs ended before the host's reply arrived).
+        private static AccessTools.FieldRef<PhysGrabHinge, bool> hingeClosed;
+        private static bool hingeClosedTried;
+
+        private static SimState HingeState(PhysGrabHinge hinge)
+        {
+            if (!hingeClosedTried)
+            {
+                hingeClosedTried = true;
+                try { hingeClosed = AccessTools.FieldRefAccess<PhysGrabHinge, bool>("closed"); }
+                catch { hingeClosed = null; }
+            }
+            if (hingeClosed == null || hinge == null || !IsClientInLobby()) return null;
+            PhysGrabObject pgo = hinge.GetComponent<PhysGrabObject>();
+            return pgo != null && states.TryGetValue(pgo, out SimState st) && st.isHinge ? st : null;
+        }
+
+        /// <summary>Our local hinge logic decided the door opens/closes: apply it now. The
+        /// host's own RPC follows and stays the authority.</summary>
+        internal static void PredictHingeClosed(PhysGrabHinge hinge, bool closed)
+        {
+            SimState st = HingeState(hinge);
+            if (st == null || hingeClosed(hinge) == closed) return;
+            hingeClosed(hinge) = closed;
+            if (!closed) st.hingeOpenedAt = Time.unscaledTime;
+            if (Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"[hinge] {st.pgo.name}: {(closed ? "closed" : "opened")} locally (ahead of the host)");
+            }
+        }
+
+        /// <summary>The host says "closed". If we are pulling the door open right now and
+        /// opened it a moment ago, that message is about an EARLIER close — keep it open.</summary>
+        internal static void HostHingeClosed(PhysGrabHinge hinge)
+        {
+            SimState st = HingeState(hinge);
+            if (st == null) return;
+            if ((st.localGrab || st.localPushTimer > 0f) && Time.unscaledTime - st.hingeOpenedAt < 0.6f)
+            {
+                hingeClosed(hinge) = false;
+            }
+        }
+
+        /// <summary>The host decided a hinge broke — mirror it by dropping our local joint.</summary>
+        private static void CheckHingeBroken(SimState st)
+        {
+            if (!st.isHinge || st.hinge == null) return;
+            if (!hingeBroken(st.hinge)) return;
+            if (st.joint != null)
+            {
+                UnityEngine.Object.Destroy(st.joint);
+                st.joint = null;
+            }
+            st.isHinge = false; // free object from now on: normal shadowing rules apply
+            if (Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"[hinge] {st.pgo.name} broke on the host — local joint dropped");
+            }
+        }
+
+        /// <summary>
+        /// The host's copy is stuck or far away — stop pretending, give the object back to the
+        /// host mid-hold. The player keeps holding it vanilla-style (host authoritative) and
+        /// gets local grab authority again on their next grab.
+        /// </summary>
+        private static void ForceHandback(SimState st)
+        {
+            st.localGrab = false;
+            st.desyncTimer = 0f;
+            st.postThrowTimer = 0f;
+            pgoIsMaster(st.pgo) = false;
+            handedBack.Add(st.pgo);
+
+            if (Plugin.VerboseLogging.Value)
+            {
+                Plugin.Log.LogInfo($"Handed {st.pgo.name} back to the host (drifted too far from its copy).");
+            }
+        }
+
+        private static void SweepHandedBack()
+        {
+            if (handedBack.Count == 0) return;
+            handedBackSweep.Clear();
+            foreach (PhysGrabObject pgo in handedBack)
+            {
+                if (pgo == null)
+                {
+                    handedBackSweep.Add(pgo);
+                    continue;
+                }
+                bool stillHeldLocally = false;
+                List<PhysGrabber> grabbing = pgo.playerGrabbing;
+                for (int i = 0; i < grabbing.Count; i++)
+                {
+                    PhysGrabber g = grabbing[i];
+                    if (g != null && g.isLocal && g.grabbed)
+                    {
+                        stillHeldLocally = true;
+                        break;
+                    }
+                }
+                if (!stillHeldLocally) handedBackSweep.Add(pgo);
+            }
+            foreach (PhysGrabObject pgo in handedBackSweep) handedBack.Remove(pgo);
+        }
+
+        /// <summary>Diagnostic: exactly what our copy believes about who holds an object.
+        /// Upgrade attribution hangs on heldByLocalPlayer, so this line in a session log
+        /// settles who claimed an upgrade and why.</summary>
+        internal static string DescribeGrabState(PhysGrabObject pgo)
+        {
+            if (pgo == null) return "(no PhysGrabObject)";
+            var sb = new System.Text.StringBuilder();
+            sb.Append("heldByLocalPlayer=");
+            sb.Append(pgoHeldByLocal != null ? pgoHeldByLocal(pgo).ToString() : "?");
+            sb.Append(" simulated=").Append(states.ContainsKey(pgo));
+            sb.Append(" localGrab=").Append(IsLocalGrab(pgo));
+            sb.Append(" grabbers=[");
+            List<PhysGrabber> grabbing = pgo.playerGrabbing;
+            for (int i = 0; i < grabbing.Count; i++)
+            {
+                PhysGrabber g = grabbing[i];
+                if (i > 0) sb.Append(", ");
+                if (g == null) { sb.Append("null"); continue; }
+                sb.Append(g.isLocal ? "LOCAL" : "remote");
+                sb.Append(grabberObject(g) == pgo ? "(holding)" : "(stale!)");
+            }
+            sb.Append(']');
+            return sb.ToString();
+        }
+
+        private static PhysGrabber GetLocalGrabber(SimState st)
+        {
+            List<PhysGrabber> grabbing = st.pgo.playerGrabbing;
+            for (int i = 0; i < grabbing.Count; i++)
+            {
+                PhysGrabber g = grabbing[i];
+                if (g != null && g.isLocal && g.grabbed && grabberObject(g) == st.pgo)
+                {
+                    return g;
+                }
+            }
+            return null;
+        }
+
+        private static void Snap(SimState st, string reason)
+        {
+            if (Plugin.VerboseLogging.Value)
+            {
+                float dist = Vector3.Distance(st.rb.position, st.hostPos);
+                Plugin.Log.LogInfo($"[snap] {st.pgo.name}: {reason} (dist={dist:F1}m)");
+            }
+            TrajEnd(st, "snapped");
+            st.rb.position = st.hostPos;
+            st.rb.rotation = st.hostRot;
+            if (!st.rb.isKinematic)
+            {
+                st.rb.velocity = st.hostVel;
+                st.rb.angularVelocity = st.hostAngVel;
+            }
+        }
+
+        /// <summary>Hand control back to PhotonTransformView without a visible snap.</summary>
+        private static void Restore(SimState st)
+        {
+            SeedPtvFields(st);
+            HardRemove(st);
+        }
+
+        /// <summary>Writes the vanilla transform view's internal state to match ours so a
+        /// handback never visibly snaps — does NOT unregister (Restore does that).</summary>
+        private static void SeedPtvFields(SimState st)
+        {
+            try
+            {
+                if (st.pgo != null)
+                {
+                    pgoIsMaster(st.pgo) = false;
+                }
+                if (st.ptv != null && st.rb != null)
+                {
+                    Vector3 targetPos = st.hasHostState ? st.hostPos : st.rb.position;
+                    Quaternion targetRot = st.hasHostState ? st.hostRot : st.rb.rotation;
+
+                    ptvNetPos(st.ptv) = targetPos;
+                    ptvNetRot(st.ptv) = targetRot;
+                    ptvRecvPos(st.ptv) = targetPos;
+                    ptvRecvRot(st.ptv) = targetRot;
+                    ptvPrevPos(st.ptv) = targetPos;
+                    ptvPrevRot(st.ptv) = targetRot;
+                    ptvSmoothedPos(st.ptv) = st.rb.position;
+                    ptvSmoothedRot(st.ptv) = st.rb.rotation;
+                    ptvDistance(st.ptv) = Vector3.Distance(st.rb.position, targetPos);
+                    ptvAngle(st.ptv) = Quaternion.Angle(st.rb.rotation, targetRot);
+                    ptvRecvVel(st.ptv) = st.hasHostState ? st.hostVel : st.rb.velocity;
+                    ptvRecvAngVel(st.ptv) = st.hasHostState ? st.hostAngVel : st.rb.angularVelocity;
+                    ptvFirstTake(st.ptv) = false;
+                    ptvTeleport(st.ptv) = false;
+                    ptvIsSleeping(st.ptv) = st.hasHostState && st.hostSleeping;
+
+                    if (st.hasHostState)
+                    {
+                        st.rb.isKinematic = st.hostKinematic;
+                    }
+                }
+            }
+            catch (Exception e)
+            {
+                if (Plugin.VerboseLogging.Value) Plugin.Log.LogWarning($"Restore failed: {e.Message}");
+            }
+        }
+
+        private static void HardRemove(SimState st)
+        {
+            if (st.pgo != null) states.Remove(st.pgo);
+            if (st.ptv != null) byPtv.Remove(st.ptv);
+
+            // dictionaries can hold destroyed-object keys; sweep those out
+            if (st.pgo == null || st.ptv == null)
+            {
+                SweepDead();
+            }
+        }
+
+        private static readonly List<PhysGrabObject> deadPgos = new List<PhysGrabObject>();
+        private static readonly List<PhotonTransformView> deadPtvs = new List<PhotonTransformView>();
+
+        private static void SweepDead()
+        {
+            deadPgos.Clear();
+            deadPtvs.Clear();
+            foreach (KeyValuePair<PhysGrabObject, SimState> kv in states)
+            {
+                if (kv.Key == null) deadPgos.Add(kv.Key);
+            }
+            foreach (KeyValuePair<PhotonTransformView, SimState> kv in byPtv)
+            {
+                if (kv.Key == null) deadPtvs.Add(kv.Key);
+            }
+            foreach (PhysGrabObject k in deadPgos) states.Remove(k);
+            foreach (PhotonTransformView k in deadPtvs) byPtv.Remove(k);
+        }
+
+        internal static void RestoreAll()
+        {
+            if (Plugin.VerboseLogging.Value && states.Count > 0)
+            {
+                Plugin.Log.LogInfo($"[mode] restoring {states.Count} objects to vanilla sync");
+            }
+            tickBuffer.Clear();
+            tickBuffer.AddRange(states.Values);
+            foreach (SimState st in tickBuffer)
+            {
+                Restore(st);
+            }
+            states.Clear();
+            byPtv.Clear();
+            handedBack.Clear();
+        }
+
+        /// <summary>NetworkingReworked's HardSync applied to everything (credit:
+        /// readthisifbad): teleport every shadowed object to the host's exact state.
+        /// The player-facing emergency desync fix, bound to a key.</summary>
+        internal static void ResyncAll()
+        {
+            int n = 0;
+            foreach (SimState st in states.Values)
+            {
+                if (!st.hasHostState || st.localGrab || st.droneExempt) continue;
+                if (st.pgo == null || st.rb == null || !pgoIsActive(st.pgo)) continue;
+                st.rb.position = st.hostPos;
+                st.rb.rotation = st.hostRot;
+                if (!st.rb.isKinematic)
+                {
+                    st.rb.velocity = st.hostVel;
+                    st.rb.angularVelocity = st.hostAngVel;
+                }
+                st.farTimer = 0f;
+                n++;
+            }
+            Plugin.Log.LogInfo($"[resync] manual hard sync: {n} objects teleported to the host's state");
+        }
+
+        internal static int RegisteredCount => states.Count;
+
+        internal static int HeldCount
+        {
+            get
+            {
+                int n = 0;
+                foreach (SimState st in states.Values)
+                {
+                    if (st.localGrab) n++;
+                }
+                return n;
+            }
+        }
+    }
+
+    /// <summary>
+    /// Per-frame upkeep, driven by the Plugin component itself (BepInEx guarantees it
+    /// persists — a separate DontDestroyOnLoad GameObject created during chainloading
+    /// silently dies with the first scene load and its Update never runs).
+    /// </summary>
+    internal static class SimDriver
+    {
+        private static bool announced;
+        private static bool conflictsChecked;
+        private static float nextRegisterSweep;
+        private static float nextStatsLog;
+        private static int lastPacketCount;
+        private static int lastFrame = -1;
+        private static float nextAutoResync;
+
+        internal static void FrameUpdate()
+        {
+            // driven from both a Harmony hook and the plugin component — once per frame
+            if (Time.frameCount == lastFrame) return;
+            lastFrame = Time.frameCount;
+
+            if (!announced)
+            {
+                announced = true;
+                Plugin.Log.LogInfo("[driver] alive — update loop running");
+            }
+
+            Plugin.EnsureCapturePatch();
+            Compat.Apply();
+            HostAssist.FrameUpdate();
+
+            if (!conflictsChecked && Time.unscaledTime > 10f)
+            {
+                conflictsChecked = true;
+                string[] conflicts =
+                {
+                    "net.ovchinikov.nwrework", "BlueAmulet.REPONetworkTweaks",
+                    "com.Revival.networkingrevived", "com.Revival.networktweaksrevived",
+                };
+                foreach (string guid in conflicts)
+                {
+                    if (BepInEx.Bootstrap.Chainloader.PluginInfos.ContainsKey(guid))
+                    {
+                        Plugin.Log.LogWarning($"Conflicting mod '{guid}' is still installed! RevivalSync replaces it — " +
+                                              "please uninstall/disable the old mod.");
+                    }
+                }
+                // CartSpeedSync: switched off by Compat.Apply (1.3.1), no warning needed
+            }
+
+            // catches objects that existed before we joined (late join, level already loaded)
+            if (Time.unscaledTime >= nextRegisterSweep)
+            {
+                nextRegisterSweep = Time.unscaledTime + 5f;
+                if (SimManager.Ready && SimManager.IsClientInLobby())
+                {
+                    foreach (PhysGrabObject pgo in UnityEngine.Object.FindObjectsByType<PhysGrabObject>(FindObjectsSortMode.None))
+                    {
+                        SimManager.TryRegister(pgo);
+                    }
+                    SimManager.EnsureDroneAccessors();
+                    SimManager.cachedDrones = UnityEngine.Object.FindObjectsByType<ItemDrone>(FindObjectsSortMode.None);
+                }
+            }
+
+            if (Plugin.VerboseLogging.Value && Time.unscaledTime >= nextStatsLog)
+            {
+                nextStatsLog = Time.unscaledTime + 10f;
+                if (SimManager.IsClientInLobby())
+                {
+                    int packets = SimManager.PacketsCaptured;
+                    // ping: a held object trails the host by about speed x lag, so the same
+                    // play feels tighter or looser purely with connection quality
+                    Plugin.Log.LogInfo($"[stats] registered={SimManager.RegisteredCount} held={SimManager.HeldCount} " +
+                                       $"packets={packets} (+{packets - lastPacketCount} in 10s) ping={PhotonNetwork.GetPing()}ms");
+                    lastPacketCount = packets;
+                }
+            }
+
+            if (SimManager.Ready && SimManager.IsClientInLobby())
+            {
+                if (Plugin.ResyncKeyCode != KeyCode.None && UnityEngine.Input.GetKeyDown(Plugin.ResyncKeyCode))
+                {
+                    SimManager.ResyncAll();
+                }
+                if (Plugin.AutoResyncSeconds.Value > 0f && Time.unscaledTime >= nextAutoResync)
+                {
+                    nextAutoResync = Time.unscaledTime + Mathf.Max(5f, Plugin.AutoResyncSeconds.Value);
+                    SimManager.ResyncAll();
+                }
+            }
+
+            Plugin.ApplyPhotonSettings();
+            Plugin.ArchiveSessionLog();
+            SimManager.MirrorHeldOrientationTargets();
+            Smoothing.Sweep();
+        }
+    }
+}

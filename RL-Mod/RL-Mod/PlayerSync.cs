@@ -329,8 +329,12 @@ namespace RL2Multiplayer
                         try
                         {
                             var info = anim.GetCurrentAnimatorStateInfo(l);
-                            hashes[l] = info.shortNameHash;
-                            times[l] = info.normalizedTime;
+                            // v2.2.0：层权重为 0 的层（攻击/施法动画已经结束、层还没切回去）
+                            // 一律发 0，让远端跳过。旧版会把"上一帧遗留的攻击状态 + t=0"
+                            // 一直发过去，远端按一次性动画补播 → 分身无限重复攻击动作。
+                            bool inactive = l > 0 && anim.GetLayerWeight(l) < 0.02f;
+                            hashes[l] = inactive ? 0 : info.shortNameHash;
+                            times[l] = inactive ? 0f : info.normalizedTime;
                         }
                         catch { hashes[l] = 0; times[l] = 0f; } // 无状态机/同步层
                     }
@@ -473,6 +477,10 @@ namespace RL2Multiplayer
                 interpolator = go.AddComponent<RemotePlayerInterpolator>();
             }
 
+            // v2.1.0：分身受击盒（怪物子弹/近战/尖刺能"碰到"对面玩家，伤害转发给真身）。
+            // 幂等：重复调用只更新 OwnerId。
+            RemoteHurtbox.Attach(go, id);
+
             // v1.7.9：若该 id 曾在我们没有分身时被标记倒地（downed 事件先到），现在补套。
             if (createdNew && RemoteDowned.Contains(id))
             {
@@ -489,6 +497,11 @@ namespace RL2Multiplayer
             RemotePlayerInterpolator interpolator;
             bool createdNew = EnsureRemoteObject(id, out go, out interpolator);
 
+            // v2.4.0：尸体不再跟随位置包。
+            // 旧版每个位置包都 SetTarget(..., freeze=false)，把刚冻结的尸体又解冻挪走，
+            // 于是"死了还在飘"。现在倒地期间位置完全由尸体下落逻辑接管。
+            if (!createdNew && RemoteDowned.Contains(id)) return;
+
             var newTarget = new Vector3(x, y, go.transform.position.z);
             if (createdNew)
             {
@@ -496,7 +509,9 @@ namespace RL2Multiplayer
                     + x.ToString("F2") + "," + y.ToString("F2") + ") facingRight=" + facingRight
                     + " (fresh target after creation).");
             }
-            interpolator.SetTarget(newTarget, facingRight);
+            // v3.0.24：把包里带来的速度也交给插值器 —— 两包之间用它外推，
+            // 分身不再"站住等下一包"，观战镜头也就不会一格一格地卡。
+            interpolator.SetTarget(newTarget, facingRight, new Vector2(vx, vy));
         }
 
         /// <summary>动画包（10Hz）：分身不存在时静默丢弃，等位置包把它建出来。</summary>
@@ -505,6 +520,10 @@ namespace RL2Multiplayer
             GameObject go;
             RemotePlayerInterpolator interpolator;
             if (!RemotePlayers.TryGetValue(id, out go) || go == null) return;
+            // v2.8.6：对端倒地后动画包会变成空数组，若继续灌进分身，
+            // 镜像层会退化成"拿本机存活玩家的 Animator 逐帧套到尸体上"。
+            // 源头挡掉，让尸体保持死亡瞬间的姿态；对方复活后会重新发包。
+            if (RemoteDowned.Contains(id)) return;
             interpolator = go.GetComponent<RemotePlayerInterpolator>();
             if (interpolator == null) return;
             interpolator.SetAnimTarget(layerHashes, layerTimes, floatParams, intParams, boolParams);
@@ -558,10 +577,20 @@ namespace RL2Multiplayer
         /// <summary>倒地意图已记录但分身当时不存在的 id，分身创建后补套外观。</summary>
         private readonly HashSet<int> _downVisualPending = new HashSet<int>();
 
-        /// <summary>统一套用/恢复倒地外观（冻结位置 + 灰化）。倒地者位置来自其稳定广播坐标。</summary>
+        /// <summary>统一套用/恢复倒地外观（隐藏模型 + 冻结位置）。倒地者位置来自其稳定广播坐标。</summary>
         private void ApplyDownedVisual(GameObject go, bool downed, int id)
         {
+            // v2.8.7（借鉴 rl2-coop Puppet.cs）：对端倒地时直接隐藏"Visual"模型子树，
+            // 而不只是把 Animator.speed 设 0。旧版只停动画、停粒子，模型节点仍在场上，
+            // 存活方画面上就一直挂着一具不动的尸体，还占着仇恨/遮挡视线。
+            // 只隐藏 Visual 子节点，不隐藏 root —— root 上的 RemoteTargetProxy /
+            // RemoteHurtbox / Interpolator 还要给观战 Follow、怪物仇恨、复活定位用。
+            // 起身时恢复（复活/新局），与 rl2-coop "隐藏 animator.gameObject, 不销毁 root" 一致。
+            SetVisualHidden(go, downed);
+
             var interp = go.GetComponent<RemotePlayerInterpolator>();
+            // v2.8.6：把倒地状态传给镜像层，让它停掉"本机动画 → 尸体"的兜底镜像。
+            if (interp != null) interp.Downed = downed;
             if (interp != null)
             {
                 if (downed)
@@ -572,6 +601,53 @@ namespace RL2Multiplayer
             // 克隆模式下没有根级 SpriteRenderer，且材质与本地玩家共享，改色会连累原体，
             // 因此不对克隆做逐 renderer 调色；倒地视觉靠冻结位置 + HUD/尸体标记表达。
             _downVisualPending.Remove(id);
+
+            // v2.2.0：倒地/死亡时把分身"收干净"。
+            // 之前只冻结位置，分身的 Animator 还在按最后一份网络状态补播、
+            // 身上的粒子也还在发射 —— 表现就是"人已经倒了，对面画面上他还在不停攻击、
+            // 法术特效一直挂着"。这里冻结动画 + 停掉所有粒子。
+            try
+            {
+                var anims = go.GetComponentsInChildren<Animator>(true);
+                for (int i = 0; i < anims.Length; i++)
+                {
+                    if (anims[i] != null) anims[i].speed = downed ? 0f : 1f;
+                }
+                if (downed)
+                {
+                    var pss = go.GetComponentsInChildren<ParticleSystem>(true);
+                    for (int i = 0; i < pss.Length; i++)
+                    {
+                        if (pss[i] != null)
+                            pss[i].Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                    }
+                }
+            }
+            catch { }
+        }
+
+        /// <summary>
+        /// v2.8.7：隐藏/恢复分身"模型"本身（rl2-coop 观战原则：死亡方不占画面）。
+        /// 整树克隆模式隐藏 Visual 子节点；白块兜底模式关掉 root 的 SpriteRenderer。
+        /// 绝不 SetActive(false) root —— 观战 Follow、怪物仇恨锚点、复活定位都挂在 root 上。
+        /// </summary>
+        private void SetVisualHidden(GameObject go, bool hidden)
+        {
+            try
+            {
+                var visual = go.transform.Find("Visual");
+                if (visual != null) { visual.gameObject.SetActive(!hidden); return; }
+                // v3.0.4：整树克隆模式下渲染器可能挂在任意子节点（不一定叫 Visual，也不一定在 root）。
+                // 旧版只查 root 的 GetComponents<SpriteRenderer> -> 克隆分身找不到任何 renderer ->
+                // 倒地分身的模型一直在场上（用户反馈"主机的模型一直在，只是没动作"）。
+                // 改为递归查所有子节点；不隐藏 root（观战 Follow / 仇恨锚点还要用）。
+                var srs = go.GetComponentsInChildren<SpriteRenderer>(true);
+                for (int i = 0; i < srs.Length; i++) if (srs[i] != null) srs[i].enabled = !hidden;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [REMOTE] SetVisualHidden(" + go.name + ") 失败: " + ex.Message);
+            }
         }
 
         // ---------------- 远程玩家外观（从本地玩家身上抄 sprite / 缩放 / 排序层） ----------------
@@ -797,6 +873,22 @@ namespace RL2Multiplayer
             go.transform.position = new Vector3(0, 0, _remoteZ);
             go.transform.localScale = Vector3.one;
 
+            // v2.8.5：给分身 root 挂一个极简 BaseCharacterController 代理。
+            // 一方倒地后 EnemyAiFix 会把怪的 e.Target 指向存活方分身，而
+            // EnemyController.Target setter 要 GetComponent<BaseCharacterController>()；
+            // 分身是剥光脚本的视觉克隆，没有它 TargetController=null，怪物 AI 读
+            // TargetController.Midpoint 时空引用崩溃 → 表现就是"怪不打存活方"。
+            // 代理不初始化、不参与伤害，只提供坐标锚点（Midpoint 回退到 transform.position）。
+            try
+            {
+                if (go.GetComponent<RemoteTargetProxy>() == null)
+                    go.AddComponent<RemoteTargetProxy>();
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[REMOTE] ID=" + id + " 挂 TargetProxy 失败: " + ex.Message);
+            }
+
             // 首选：整树克隆（有完整骨架和动画）
             var template = GetVisualCloneTemplate();
             if (template != null)
@@ -841,6 +933,14 @@ namespace RL2Multiplayer
             clone.transform.SetParent(go.transform, false);
             clone.transform.localPosition = Vector3.zero;
 
+            // v2.8.5：修观战时"位置往前、动画却像倒着走"。
+            // 游戏原生 Character.Flip() 翻的是 CharacterModel 子树（localScale.x = -1），
+            // 整树克隆会把这个负 x 一并带进 Visual；而分身每帧又靠父 go 的 localScale.x
+            // 按主机朝向翻面 —— 两套翻转叠加，模型朝向就和主机传来的带符号动画参数
+            // （FacingSpeed/Speed）对不上，看起来就是"往右平移却播向后走"。
+            // 把模板树里残留的负 x 规范成正，让翻面只由父 go 一处决定。
+            NormalizeCloneScale(clone);
+
             // 外观必须先于 SetActive：LookController 的 OnEnable/Start 会注册事件、
             // 甚至等 PlayerController（分身没有），所以在激活前就关掉它的逻辑，
             // 只把它当成"外观数据容器"来用。
@@ -865,6 +965,34 @@ namespace RL2Multiplayer
             Plugin.Log.LogInfo("[RL2MP] [REMOTE] ID=" + id + " 外观: 整树克隆（骨架网格 + Animator + 动画镜像）"
                 + (lookApplied ? " + 对方角色外观" : "（等对方外观包，收到后会刷新）"));
             return true;
+        }
+
+        /// <summary>
+        /// v2.8.5：把克隆视觉树里残留的负 x 缩放规范为正。
+        /// 只处理 |x| 接近 1 的翻转节点（Character.Flip 用 FlipValue=(-1,1,1) 翻模型），
+        /// 不动美术上刻意做镜像/缩放的子物体，避免改变外观。
+        /// </summary>
+        private static void NormalizeCloneScale(GameObject clone)
+        {
+            var all = clone.GetComponentsInChildren<Transform>(true);
+            int fixedCount = 0;
+            for (int i = 0; i < all.Length; i++)
+            {
+                var t = all[i];
+                if (t == null) continue;
+                var s = t.localScale;
+                // 只认"整体翻面"：x 为负且绝对值在 [0.9, 1.1]，y/z 为正
+                if (s.x < 0f && Mathf.Abs(s.x) >= 0.9f && Mathf.Abs(s.x) <= 1.1f
+                    && s.y > 0f && s.z > 0f)
+                {
+                    s.x = Mathf.Abs(s.x);
+                    t.localScale = s;
+                    fixedCount++;
+                }
+            }
+            if (fixedCount > 0)
+                Plugin.Log.LogInfo("[RL2MP] [REMOTE] 视觉模板朝向已规范化，修正 " + fixedCount
+                    + " 个翻转节点（翻面改由分身 root 统一负责）");
         }
 
         /// <summary>
@@ -1007,6 +1135,15 @@ namespace RL2Multiplayer
         private float _visualFacingScaleX;
         private bool _frozen;
 
+        // v2.8.6：该分身的拥有者已倒地。镜像层据此停掉动画/粒子兜底同步，
+        // 避免"尸体跟着存活方的动作一起动"。复活时会被置回 false。
+        internal bool Downed;
+
+        // v2.4.0：尸体下坠。旧版倒地直接冻结位置 —— 人死在空中，尸体就永远悬在半空。
+        private bool _corpseFalling;
+        private float _corpseVy;
+        private float _corpseFallTime;
+
         // 网络送来的动画状态（由 RemoteAnimatorMirror 消费）—— v1.6.3 全层 + 参数
         internal int[] TargetLayerHashes = new int[0];
         internal float[] TargetLayerTimes = new float[0];
@@ -1017,6 +1154,18 @@ namespace RL2Multiplayer
         internal float AnimPacketTime;
 
         private const float LerpSpeed = 18f;
+
+        /// <summary>v3.0.24：最近一次位置包带的速度（世界单位/秒）。位置包只有 20Hz，
+        /// 两包之间分身原本是"站住等下一包"的台阶；观战镜头跟着分身走，台阶就变成一格一格的卡顿。
+        /// 用包里本来就有的 vx/vy 在两包之间外推一小段，台阶就消了。</summary>
+        private Vector2 _targetVel;
+        /// <summary>v3.0.24：最近一次位置包的到达时刻（unscaled）。</summary>
+        private float _targetAtUnscaled = -999f;
+        /// <summary>v3.0.24：外推时长上限（秒）。对端急停/转向时不能一直冲出去。</summary>
+        private const float MaxExtrapolate = 0.12f;
+        /// <summary>v3.0.24：单次外推的最大位移（米）。被击飞时速度很大，不限幅会冲过头。</summary>
+        private const float MaxLead = 2.5f;
+        private const float MaxLeadSqr = MaxLead * MaxLead;
 
         private float _rateLimit;
 
@@ -1031,17 +1180,88 @@ namespace RL2Multiplayer
 
         public void SetTarget(Vector3 pos, bool facingRight)
         {
-            _targetPos = pos;
-            _targetFacingRight = facingRight;
-            _frozen = false;
+            SetTarget(pos, facingRight, Vector2.zero, false);
+        }
+
+        /// <summary>v3.0.24：带速度的位置包。速度用于两包之间外推，消除 20Hz 台阶感。</summary>
+        public void SetTarget(Vector3 pos, bool facingRight, Vector2 vel)
+        {
+            SetTarget(pos, facingRight, vel, false);
         }
 
         /// <summary>freeze=true 时锁定在原地（倒地），不再插值移动。</summary>
         public void SetTarget(Vector3 pos, bool facingRight, bool freeze)
         {
+            SetTarget(pos, facingRight, Vector2.zero, freeze);
+        }
+
+        public void SetTarget(Vector3 pos, bool facingRight, Vector2 vel, bool freeze)
+        {
             _targetPos = pos;
             _targetFacingRight = facingRight;
+
+            if (!freeze)
+            {
+                _targetVel = vel;
+                _targetAtUnscaled = Time.unscaledTime;
+            }
+            else
+            {
+                // 倒地：位置交给尸体下坠逻辑，速度外推必须停掉，否则尸体会继续往前飘。
+                _targetVel = Vector2.zero;
+                _targetAtUnscaled = -999f;
+            }
+
+            if (freeze && !_frozen)
+            {
+                // 刚倒下：开始自由落体（尸体不该悬在空中）
+                _corpseFalling = true;
+                _corpseVy = 0f;
+                _corpseFallTime = 0f;
+            }
+            else if (!freeze && _frozen)
+            {
+                // 复活：停止下坠
+                _corpseFalling = false;
+                _corpseVy = 0f;
+            }
+
             _frozen = freeze;
+        }
+
+        /// <summary>尸体自由落体：脚下有非触发器碰撞体就停住；最多落 3 秒防掉出世界。</summary>
+        private void TickCorpseFall(float dt)
+        {
+            if (!_corpseFalling) return;
+            if (dt <= 0f) return;
+            if (dt > 0.05f) dt = 0.05f;
+
+            _corpseFallTime += dt;
+            if (_corpseFallTime > 3f) { _corpseFalling = false; _corpseVy = 0f; return; }
+
+            _corpseVy -= 45f * dt;
+            if (_corpseVy < -30f) _corpseVy = -30f;
+
+            Vector3 next = transform.position + new Vector3(0f, _corpseVy * dt, 0f);
+            try
+            {
+                var hits = Physics2D.RaycastAll(new Vector2(next.x, next.y + 0.4f), Vector2.down, 1.0f);
+                if (hits != null)
+                {
+                    for (int i = 0; i < hits.Length; i++)
+                    {
+                        var col = hits[i].collider;
+                        if (col == null || col.isTrigger) continue;                          // 触发器不算地板
+                        if (col.GetComponentInParent<BaseCharacterController>() != null) continue; // 别的角色
+                        _corpseFalling = false;
+                        _corpseVy = 0f;
+                        return;
+                    }
+                }
+            }
+            catch { }
+
+            transform.position = next;
         }
 
         /// <summary>记录网络送来的动画状态（hash=0 表示无数据，镜像组件会降级为待机/本地镜像）。</summary>
@@ -1078,9 +1298,37 @@ namespace RL2Multiplayer
 
         private void Update()
         {
-            if (_frozen) return;
+            // v3.0.24：这里全部改用 unscaled 时间。
+            // 受缩放的 Time.deltaTime 在 Time.timeScale=0 时是 0 —— 而 timeScale=0 不只会
+            // 出现在暂停菜单（PauseCompat 会抢回 1），Boss 死亡定格（Cutscene 类型，PauseCompat
+            // 明确不拦）和场景转场都会真的把它压到 0。那时候分身会原地冻住，
+            // 观战镜头又是跟着分身走的 → 整个观战画面卡死不动（用户反馈的"观战视角特别卡"）。
+            float dt = Time.unscaledDeltaTime;
 
-            transform.position = Vector3.Lerp(transform.position, _targetPos, Time.deltaTime * LerpSpeed);
+            if (_frozen)
+            {
+                TickCorpseFall(dt);
+                return;
+            }
+
+            // 目标点 = 收到的位置 + 速度外推（消除 20Hz 台阶感）。
+            Vector3 goal = _targetPos;
+            if (_targetAtUnscaled > 0f)
+            {
+                float age = Mathf.Clamp(Time.unscaledTime - _targetAtUnscaled, 0f, MaxExtrapolate);
+                if (age > 0f)
+                {
+                    Vector3 lead = new Vector3(_targetVel.x, _targetVel.y, 0f) * age;
+                    // 被击飞/弹射时速度能到几十单位每秒，外推会冲出好几米 —— 限幅，
+                    // 否则分身会先飞出去再被下一包拽回来，抖得很明显。
+                    if (lead.sqrMagnitude > MaxLeadSqr) lead = lead.normalized * MaxLead;
+                    goal += lead;
+                }
+            }
+
+            // Clamp01：dt*LerpSpeed 在低帧率下会 >1，Vector3.Lerp 会过冲，表现为来回抖。
+            float t = Mathf.Clamp01(dt * LerpSpeed);
+            transform.position = Vector3.Lerp(transform.position, goal, t);
 
             // 朝向直接翻面。之前用 Lerp 从 +1 过渡到 -1，途中会经过 0（宽度为零），
             // 看起来就是"原地转一下然后消失"——这就是你看到的现象之一。
@@ -1092,7 +1340,7 @@ namespace RL2Multiplayer
                 transform.localScale = scale;
             }
 
-            _rateLimit += Time.deltaTime;
+            _rateLimit += dt;
             if (_rateLimit > 3f)
             {
                 _rateLimit = 0f;
@@ -1131,13 +1379,56 @@ namespace RL2Multiplayer
         private readonly List<AnimPair> _animPairs = new List<AnimPair>();
         private readonly List<FxPair> _fxPairs = new List<FxPair>();
         private RemotePlayerInterpolator _interp;
+
+        /// <summary>
+        /// v3.0.5：给特效主动桥用的主分身 Animator（_animPairs[0] 的克隆侧）。
+        /// 原生 EffectTrigger.InvokeTrigger 需要一个 Animator 作为特效来源，
+        /// 复用镜像已配对的主 Animator，保证特效跟随正确的身体。
+        /// </summary>
+        internal Animator PrimaryCloneAnimator
+        {
+            get { return _animPairs.Count > 0 ? _animPairs[0].Clone : null; }
+        }
         private const float ResyncThreshold = 0.18f;       // 循环状态允许的时间漂移（本地全量镜像用）
         private const float OneShotRestartGap = 0.05f;     // 一次性状态判定"本地重新开始"的回卷幅度
         private const float NetLoopDrift = 0.3f;           // 网络循环动画允许的绝对时间漂移
         private const float NetLoopResyncGap = 0.5f;       // 网络循环动画两次重对时的最小间隔
         private const float NetOneShotResyncGap = 0.3f;    // 网络一次性动画两次重播的最小间隔
         private readonly float[] _lastResync = new float[16]; // 每层上次对网络动画执行 Play 的时刻
+        // v1.8.3：每层上次收到的网络 normalizedTime，用来检测"对端重新触发同一次性动画"(t 回卷)。
+        private readonly float[] _lastRemoteNorm = new float[16];
+        private readonly bool[] _hasRemoteNorm = new bool[16];
+        // v2.2.0：一次性动画重播看门狗。真正的信号不是"补播次数多"，而是
+        // "补播了但网络送来的 t 几乎没前进"——说明对端把某个残留状态一直发过来
+        // （攻击/施法层权重已归零但状态还没切走），继续补播只会让分身无限重复攻击。
+        private readonly int[] _stuckHash = new int[16];
+        private readonly int[] _noProgressCount = new int[16];
+        private readonly float[] _lastReplayT = new float[16];
+        private readonly bool[] _hasReplayT = new bool[16];
+        private const int ReplayWinLimit = 5;
+        // v2.5.4：对端层权重归零(hash=0)时，克隆体那层仍停在法术最后一帧且继续推进
+        // normalizedTime（日志里 curN=95 / 245 就是这么来的）。这里显式把该层静音，
+        // 下次真有状态到来再恢复权重，避免残留特效 + 每帧重试 Play 拖帧。
+        private readonly bool[] _layerMuted = new bool[16];
+        // 参数快照只需在新动画包到达时套用，不必每帧重复 109 次 Animator.Set*。
+        private double _lastAppliedAnimPacketTime = -1d;
+        // v2.7.1：法术只有一帧的根因——发送端一层只发 1 个包的 hash 就变成 0，
+        // 我们收到第一个 hash=0 就立刻静音，施法动画被砍成一帧。
+        // 改成连续 N 个包都为 0 才静音（10Hz ≈ 0.5s），让一次性法术播完。
+        private readonly int[] _zeroHashPackets = new int[16];
+        // v2.9.1：之前以"12 个包"为阈值，但计数写在每帧执行的 ApplyNetworkAnim() 里，
+        // 实际是 12 帧≈0.2s（60fps），远小于 Lance 蓄力 0.55s —— 这正是"法术动态
+        // 动画没结合"的根因。改成按“连续无状态的真实时长”判断，与帧率/包率都无关。
+        private const float ZeroStateMuteSeconds = 1.2f;
+        // 每层第一次收到 hash=0 的时刻；-1 表示当前不是零状态。
+        private readonly float[] _zeroStateSince = new float[16];
+        // v3.0.2：施法事件接管——收到 AbilityFx 事件后，该层在窗口期内由事件重放驱动，
+        // ApplyNetworkAnim 跳过该层的逐层硬追，避免和事件 Play 打架（两套机制并存可回退）。
+        private readonly float[] _fxTakeoverUntil = new float[16];
+        private float _lastMuteLog;
         private float _disableListTimer;                   // 克隆体效果禁用列表重申计时
+        private float _animDiagTimer;                      // 动画诊断日志节流
+        private int _replayCount;                          // 诊断窗口内 Play(重播)次数
 
         /// <summary>
         /// 按相对路径把本地玩家树上的 Animator/ParticleSystem 配对到克隆体上。
@@ -1146,6 +1437,17 @@ namespace RL2Multiplayer
         public void Bind(GameObject localRoot, GameObject cloneRoot)
         {
             if (localRoot == null || cloneRoot == null) return;
+
+            // v2.5.4：分身重建后所有层状态/静音标记必须清空，否则新克隆体会继承
+            // 上一次的"层已静音"判断，导致法术再次不显示。
+            Array.Clear(_layerMuted, 0, _layerMuted.Length);
+            Array.Clear(_stuckHash, 0, _stuckHash.Length);
+            Array.Clear(_lastRemoteNorm, 0, _lastRemoteNorm.Length);
+            Array.Clear(_hasRemoteNorm, 0, _hasRemoteNorm.Length);
+            Array.Clear(_zeroHashPackets, 0, _zeroHashPackets.Length);
+            Array.Clear(_fxTakeoverUntil, 0, _fxTakeoverUntil.Length);
+            for (int i = 0; i < _zeroStateSince.Length; i++) _zeroStateSince[i] = -1f;
+            _lastAppliedAnimPacketTime = -1d;
 
             try
             {
@@ -1222,6 +1524,12 @@ namespace RL2Multiplayer
                 _disableListTimer = 0f;
                 EnsureCloneEffectsDisabled();
             }
+
+            // v2.8.6：对端倒地后它的动画包会变空，TargetLayerHashes.Length==0 会走
+            // 下面的 MirrorAnimator 兜底 —— 那是用"本机存活玩家"的 Animator 逐帧
+            // 往尸体上套，正是"尸体跟着活人一起动"的根因。这里直接停掉镜像，
+            // 尸体保持死亡瞬间的姿态；活人分身 Downed=false，完全不受影响。
+            if (_interp != null && _interp.Downed) return;
 
             try
             {
@@ -1337,6 +1645,48 @@ namespace RL2Multiplayer
             }
         }
 
+        /// <summary>层从"静音"恢复：对端重新起招时先把克隆体层权重还回去。</summary>
+        private void EnsureLayerAudible(Animator cl, int layer)
+        {
+            if (layer <= 0 || !_layerMuted[layer]) return; // 第 0 层权重恒为 1，不能静音
+            try { cl.SetLayerWeight(layer, 1f); } catch { }
+            _layerMuted[layer] = false;
+        }
+
+        /// <summary>
+        /// v3.0.2：施法事件重放（HKMP 式）。收到对端 AbilityFx 事件后，让分身
+        /// 对应层从 0 播一次施法动画，并在窗口期内接管该层——期间 ApplyNetworkAnim
+        /// 不再用逐层 hash 硬追该层，避免"一次性动画被反复 Play 拉回"的抽搐。
+        /// 与逐层镜像并存：窗口过后自动交还，可单独回退（不收到事件则本方法从不调用）。
+        /// </summary>
+        internal void ReplayAbilityLayer(int layer, int hash)
+        {
+            if (_animPairs.Count == 0) return;
+            var cl = _animPairs[0].Clone;
+            if (cl == null || layer < 0 || layer >= cl.layerCount || hash == 0) return;
+            try
+            {
+                // 施法层之前可能被静音（权重 0）：强制恢复，否则 Play 了也看不见。
+                if (layer > 0)
+                {
+                    cl.SetLayerWeight(layer, 1f);
+                    _layerMuted[layer] = false;
+                }
+                cl.Play(hash, layer, 0f);
+                // 接管窗口：该层跳过硬追，让事件重放的动画自然播完。
+                _fxTakeoverUntil[layer] = Time.unscaledTime + 1.5f;
+                // 清掉该层旧的一次性动画看门狗状态，下次真正切换才不会被误判残留。
+                _stuckHash[layer] = 0;
+                _noProgressCount[layer] = 0;
+                _hasReplayT[layer] = false;
+                _zeroStateSince[layer] = -1f;
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [ANIM] 事件重放失败 layer=" + layer + ": " + ex.Message);
+            }
+        }
+
         /// <summary>
         /// 真实联机：网络送来所有层的状态 + 参数。
         ///
@@ -1350,15 +1700,28 @@ namespace RL2Multiplayer
             if (_animPairs.Count == 0 || _animPairs[0].Clone == null) return;
             var cl = _animPairs[0].Clone;
 
-            // 参数每帧套用：blend tree / 层权重由参数驱动，攻击方向、蓄力等靠它
-            ApplyParams(cl);
+            // v2.5.4：参数只在"新动画包到达"时套用（10Hz）。旧版每帧重复 109 次
+            // Animator.Set*，主机上 6 层以上时是实打实的主线程开销。
+            // v2.9.1：newPacket 同时用作零状态计时的唯一时基 —— 一个网络包只记一次，
+            // 不会因为渲染 60/144fps 就把 0.2s 误当成 1.2s。
+            double packetTime = _interp.AnimPacketTime;
+            bool newPacket = packetTime != _lastAppliedAnimPacketTime;
+            if (newPacket)
+            {
+                _lastAppliedAnimPacketTime = packetTime;
+                ApplyParams(cl);
+            }
 
             var hashes = _interp.TargetLayerHashes;
             var times = _interp.TargetLayerTimes;
             if (hashes == null || hashes.Length == 0) return;
 
             // 预测此刻的归一化时间（最多预测 0.3s，丢包时别让预测飞出去）
-            float age = Time.unscaledTime - _interp.AnimPacketTime;
+            float rawAge = Time.unscaledTime - _interp.AnimPacketTime;
+            // v2.2.0：超过 0.6s 没收到动画包 = 数据断流（对端倒地/正在重连/切场景）。
+            // 这时候绝不能拿最后一份"正在攻击"的目标继续补播，否则分身会一直打。
+            bool animStale = _interp.AnimPacketTime <= 0f || rawAge > 0.6f;
+            float age = rawAge;
             if (age < 0f) age = 0f;
             if (age > 0.3f) age = 0.3f;
 
@@ -1368,23 +1731,78 @@ namespace RL2Multiplayer
 
             for (int l = 0; l < layers; l++)
             {
+                // v3.0.2：该层正由 AbilityFx 事件重放驱动——跳过逐层硬追，
+                // 否则事件刚 Play(0) 就被网络的归一化时间硬拉回去，法术又成抽搐。
+                if (now < _fxTakeoverUntil[l]) continue;
+
                 int hash = hashes[l];
                 float t = times[l];
-                if (hash == 0) continue; // 该层无数据（无状态机/同步层）
+                if (hash == 0)
+                {
+                    // 该层已无数据（对端层权重归零）：顺手清掉看门狗锁
+                    if (_stuckHash[l] != 0) { _stuckHash[l] = 0; _noProgressCount[l] = 0; _hasReplayT[l] = false; }
+                    // v2.9.1：按真实时间计时，不再按帧/按包计数。
+                    // 施法层常常只有很少几个包带 hash，随后权重归零但动画仍在播；
+                    // 必须给足 1.2s 让 Lance 这类 0.55s 蓄力 + 施法完整结束。
+                    if (newPacket)
+                    {
+                        if (_zeroStateSince[l] < 0f) _zeroStateSince[l] = now;
+                        _zeroHashPackets[l]++; // 只用于日志，不再作为阈值
+                    }
+                    float zeroFor = _zeroStateSince[l] < 0f ? 0f : now - _zeroStateSince[l];
+                    if (zeroFor >= ZeroStateMuteSeconds && l > 0 && !_layerMuted[l])
+                    {
+                        try
+                        {
+                            cl.SetLayerWeight(l, 0f);
+                            // v2.8.1：只把权重设 0，状态机仍停在上一次施法状态并继续推进，
+                            // normalizedTime 会涨到几十上百；下次同 hash 到来时
+                            // hash 相同不再走"切换"分支，只能靠重播硬拉，画面就是抽搐。
+                            // 顺便把该层复位到空状态，下次必然走正常切换。
+                            cl.Play(0, l, 0f);
+                        }
+                        catch { }
+                        _layerMuted[l] = true;
+                        if (Time.unscaledTime - _lastMuteLog > 5f)
+                        {
+                            _lastMuteLog = Time.unscaledTime;
+                            Plugin.Log.LogInfo("[RL2MP] [ANIM] 层 " + l + " 连续 "
+                                + zeroFor.ToString("F2") + "s 无状态 -> 静音（法术结束）");
+                        }
+                    }
+                    continue; // 该层无数据（无状态机/同步层）
+                }
+                _zeroHashPackets[l] = 0;  // 只用于日志
+                _zeroStateSince[l] = -1f; // 对端又给状态了，取消静音倒计时
+
+                if (_stuckHash[l] != 0 && hash != _stuckHash[l])
+                {
+                    // 对端换到新状态了，解锁
+                    _stuckHash[l] = 0;
+                    _noProgressCount[l] = 0;
+                    _hasReplayT[l] = false;
+                    _lastResync[l] = 0f;
+                }
 
                 AnimatorStateInfo ci;
                 try { ci = cl.GetCurrentAnimatorStateInfo(l); }
                 catch { continue; }
 
                 bool loop = ci.loop;
-                float predN = t + (loop ? age : 0f);
+                // v1.8.3：一次性动画(法术/攻击)也加 age 预测。旧版一次性不加，predN=t
+                // 天然落后分身本地 60fps 进度 → 每帧都像"对端重新开始"→ 反复 Play 拉回，
+                // 表现为法术一直卡顿/抽搐。加 age 后预测时间追上真实进度，消除误判。
+                float predN = t + age;
                 float predF = predN - Mathf.Floor(predN);
 
                 if (hash != ci.shortNameHash)
                 {
                     // 状态切换（含攻击/冲刺进入更高层）：立即播新状态并对齐时间
+                    EnsureLayerAudible(cl, l);
                     cl.Play(hash, l, predN);
                     _lastResync[l] = now;
+                    _lastRemoteNorm[l] = t;
+                    _hasRemoteNorm[l] = true;
                     continue;
                 }
 
@@ -1396,24 +1814,59 @@ namespace RL2Multiplayer
                     // 循环状态（跑/待机）：比绝对时间。绝对时间单调递增，没有回卷误判。
                     if (Mathf.Abs(predN - curN) > NetLoopDrift && now - _lastResync[l] >= NetLoopResyncGap)
                     {
+                        EnsureLayerAudible(cl, l);
                         cl.Play(hash, l, predN);
                         _lastResync[l] = now;
                     }
+                    _lastRemoteNorm[l] = t;
+                    _hasRemoteNorm[l] = true;
                     continue;
                 }
 
-                // 一次性状态（攻击/冲刺/翻滚）：绝不中途重启。两种情况需要重对时：
-                // a) 分身已播完而本地还在播（normalizedTime 停在 1.0）
-                // b) 本地重新开始了（连击快速连打，目标时间回卷）
+                // v1.8.3 一次性状态（法术/攻击/冲刺/翻滚）重对时判定：
+                // 正确的"对端重新施法"信号是【网络送来的 t 回卷】(t 明显小于上一包)，
+                // 而不是拿本地进度比(predF<curF)——后者因网络滞后会持续误判。
+                bool remoteRestarted = _hasRemoteNorm[l] && (t < _lastRemoteNorm[l] - OneShotRestartGap);
+                _lastRemoteNorm[l] = t;
+                _hasRemoteNorm[l] = true;
+
+                // a) 分身已播完(curN>=1)但预测目标还在播(predN<1)：补播对齐一次
+                // b) 对端确实重新触发了同一动画(t 回卷)：从头对齐
                 bool cloneFinished = curN >= 0.99f;
-                bool localStillPlaying = predN < 0.99f;
-                bool localRestarted = (predF < curF) && (curF - predF) > OneShotRestartGap;
-                if ((cloneFinished && localStillPlaying) || localRestarted)
+                bool targetStillPlaying = predN < 0.99f;
+                bool needReplay = (cloneFinished && targetStillPlaying) || remoteRestarted;
+                if (needReplay && !animStale && now - _lastResync[l] >= NetOneShotResyncGap)
                 {
-                    if (now - _lastResync[l] >= NetOneShotResyncGap)
+                    // 看门狗：补播了 t 却没前进 → 目标状态在原地打转，连续 5 次就锁住该层
+                    bool noProgress = _hasReplayT[l] && Mathf.Abs(t - _lastReplayT[l]) < 0.05f;
+                    _noProgressCount[l] = noProgress ? _noProgressCount[l] + 1 : 0;
+                    _lastReplayT[l] = t;
+                    _hasReplayT[l] = true;
+
+                    if (_noProgressCount[l] >= ReplayWinLimit)
                     {
-                        cl.Play(hash, l, predN);
-                        _lastResync[l] = now;
+                        _stuckHash[l] = hash;
+                        _noProgressCount[l] = 0;
+                        Plugin.Log.LogWarning("[RL2MP] [ANIM] 分身第 " + l + " 层收到的状态停在 t="
+                            + t.ToString("F3") + " 不动（hash=" + hash + "），判定为残留状态，"
+                            + "停止补播直到状态变化。");
+                        _lastRemoteNorm[l] = t;
+                        continue;
+                    }
+
+                    EnsureLayerAudible(cl, l);
+                    cl.Play(hash, l, predN);
+                    _lastResync[l] = now;
+                    _replayCount++;
+                    // 节流诊断：法术/攻击层(l>=0)频繁重播时会打出来，便于定位卡顿
+                    if (now - _animDiagTimer > 2f)
+                    {
+                        _animDiagTimer = now;
+                        Plugin.Log.LogInfo("[RL2MP] [ANIM] replay layer=" + l + " hash=" + hash
+                            + " loop=" + loop + " t=" + t.ToString("F3") + " predN=" + predN.ToString("F3")
+                            + " curN=" + curN.ToString("F3") + " age=" + age.ToString("F3")
+                            + " remoteRestarted=" + remoteRestarted + " replays/2s~" + _replayCount);
+                        _replayCount = 0;
                     }
                 }
             }
@@ -1460,23 +1913,23 @@ namespace RL2Multiplayer
             {
                 var lp = _fxPairs[i].Local;
                 var cp = _fxPairs[i].Clone;
-                if (lp == null || cp == null) continue;
+                if (cp == null) continue;
 
                 try
                 {
-                    // 发射开关同步（有些特效靠开关 emission 做节流）
-                    var le = lp.emission;
-                    var ce = cp.emission;
-                    if (le.enabled != ce.enabled) ce.enabled = le.enabled;
-
-                    // 播放状态同步
-                    if (lp.isEmitting && !cp.isEmitting)
+                    // v2.2.0：只跟随"停止"，绝不替对端"开场"。
+                    //
+                    // 旧实现看到本机粒子在发射就 cp.Play() —— 等于把**我自己**的法术特效
+                    // 贴到对端分身上。持续性法术（火焰/护盾这类常驻发射器）结束后本机特效
+                    // 被回收成 null，旧代码直接 continue，分身那份就一直喷下去：法术早停了，
+                    // 对方画面上还在放。攻击动作也是同理，看着像"不停歇地攻击"。
+                    //
+                    // 分身自己的粒子由它的动画驱动（克隆体 Animator 已被加进
+                    // EffectManager 的禁用列表，防止二次伤害），所以这里不需要也不该接管开始。
+                    if (lp == null || !lp.isEmitting || !lp.gameObject.activeInHierarchy)
                     {
-                        cp.Play();
-                    }
-                    else if (!lp.isEmitting && cp.isEmitting)
-                    {
-                        cp.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
+                        if (cp.isEmitting || cp.particleCount > 0)
+                            cp.Stop(true, ParticleSystemStopBehavior.StopEmittingAndClear);
                     }
                 }
                 catch (Exception)

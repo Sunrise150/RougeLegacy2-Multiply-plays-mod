@@ -1,0 +1,686 @@
+# Clive Barker's Jericho (2007)
+
+| | |
+|---|---|
+| Engine | MercurySteam ScrapEngine (the Scrapland engine), Lua 5.1.1, D3D9, PhysX 2.7 |
+| Versions tested | Retail DVD, `Jericho.exe` 1.0.0.1, SHA-256 `7fb5b759823283a83b685adc4848289a149f520ddbab6dbc7f9e6131b15d2a62`, Windows 10 and 11; also with SMOD 1.0.3, and (0.3.0) with SMOD Add-ons 1.1 on one PC against a plain host; 0.3.1 to 0.3.3 on a Windows 10 test PC with a Russian game copy (0.3.2 also with Ultimate ASI Loader 10.0.2, 0.3.3 also on a copy with the SMOD Add-ons' German texts); 0.3.4 on two test PCs over a LAN with the same video settings, menus in Russian and English |
+| Projects | [Jericho Co-op+](https://github.com/dolbaras/jericho-coop) (directory entry "Jericho Co-op+", called Jericho Co-op before 0.2.4); fork MAK-PIVO/jericho-coop (no longer public since 2026-10-22), merged back in 0.2.1 |
+| QA level | automated (up to 0.3.0: whole campaign over a LAN between two PCs, menus driven like a player with virtual gamepads, every story split with a real host and client; 0.3.1 to 0.3.3: offline tests plus live checks on one test PC; 0.3.4: the whole campaign over a LAN between two PCs again, split screen with two gamepads, real skip votes and a real QTE scene); a first human session over Steam (missions 1-8). Lab-tested only: nobody outside the lab has played 0.3.1 to 0.3.4 |
+| Last updated | 2026-11-16 (0.3.4) |
+
+## Where things stand
+
+Two to four players can play the whole campaign together, each controlling one squad member
+while the AI keeps the rest, over a local network, direct IP or Steam, and two of them can
+share one PC in split screen. Builds are released with an installer
+([releases](https://github.com/dolbaras/jericho-coop/releases), [0.3.4](https://github.com/dolbaras/jericho-coop/releases/tag/v0.3.4) at the time of writing),
+in English, Russian, German, French, Spanish and Italian; from 0.2.3 the installer's shortcut
+installs a newer release from GitHub before each start. Every level, power, story part and
+cutscene runs in automated tests. A first session between two people over Steam (missions
+1-8) found enemies that ignored joining players, walls only they met, scripts that took their
+controls and actions the host did not see; 0.2.2 fixes those. 0.2.3 gives each fire team its
+own player to follow, syncs every breakable and movable object and keeps a downed player on
+their side of a story split. 0.2.4 gives the players their
+place in the story (the host is Ross's soul, the second player Jones's astral projection,
+players 3-4 the squad members themselves), adds a display mode and refresh rate to the game's
+Video settings, renames the mod Jericho Co-op+ (it does more than co-op) and fixes what a full
+code review and the release tests found. 0.2.5 completes 0.2.4: the items
+0.2.4 left open (a split screen player waiting for a body, the last boss's rune, game folders
+with any name), a game start without a mouse and an installer record fix. 0.2.6 fixes the
+game's exit, which stopped on a D3D warning box, and lets the installer find and update every
+earlier version, the first test build (no installer) included. 0.2.7 keeps the split screen HUD in
+shape on wide screens, shows each split screen player their own hints, stops an engine halt
+when switching squad members in split screen, caps the frame rate at the screen's (twice it in
+split screen), makes Rawlings come for a downed player 3-4 every time, stops a joining PC's
+split screen player from falling through the map at a level's start and fixes a rare crash on
+a joining PC when the psychic commander disappears. 0.2.8 fixes what the first long Steam
+sessions of 0.2.7 found (players sunk into the ground, enemy fire a client could not see or
+feel, bosses and dialogue missing on the joining PC). 0.2.9 smooths other players' characters
+and enemies on the joining PC, lets enemy fire (flames, missiles, blows, bosses) reach a
+joining player, shows the squad choice screen at every story split and fixes a "puppet stuck,
+flying or snapping back and forth" storm. 0.3.0 goes through every weapon, fire mode, reload,
+melee strike, power and ability of the seven playable characters, held by a person and by the
+AI, and checks on screen what the watching player sees; it adds gestures for actions that
+have no animation in the game, a compatibility layer for SMOD Add-ons, and a single-file
+setup exe next to the zip. 0.3.1 fixes what a tester reported on 0.3.0 in split screen
+(two players on one PC): player 2 could not attack in Chapter 1, and each half of the screen
+was small (it is now filled by default, with a setting in the Video screen); it also adds a
+one-click log zip for bug reports. 0.3.2 passes nicknames as Unicode (UTF-8) so every game shows
+them in its own font, puts the mod's remaining English texts into the player's language, tells
+the player what happens to another mod's `dinput8.dll` (an ASI loader is kept and switched off
+while co-op is installed, and restored on removal), and adds a hint for SMOD's forced English.
+0.3.3 changes only texts (the DLL is the 0.3.2 one): every text the mod adds was reviewed in all
+six languages (the Russian story texts now speak of Church, Cole and Black as women, German uses
+"Sie" and Spanish "tú" throughout, French and Italian the feminine forms, every language the
+game's own names), and the bug-report collector's window and the setup exe's messages come in 16
+languages. 0.3.4 (2026-11-16) comes from a check of every kind of sync the Resident Evil
+Revelations co-op mods have, against Jericho, and makes what one player does visible to the
+others: in split screen each half sees the other player reload, strike and cast on the
+character; every player votes to skip a cutscene (split screen player 2 too, and the vote line
+now shows over the scene); the level-start screen names the players still loading; Cole's
+grenades and mines fly, lie and blow up on every PC; a partner off the screen gets a marker at the
+side of the view; and a joining player's kills count towards the game's artwork unlocks. Honest
+status: 0.3.1 to 0.3.3 were checked by offline tests and by live checks on one test PC; 0.3.4 by
+offline tests and live checks on two test PCs over a LAN, the whole campaign included (below).
+Nobody has played 0.3.1 to 0.3.4 by hand outside the lab. A whole campaign played through by
+people is still to come.
+
+## Existing work
+
+- Before this project: no co-op or multiplayer mod found (GitHub, Nexus, ModDB, Steam forums
+  via web search, 2026-10-18). Players asking for one:
+  [ModDB](https://www.moddb.com/forum/thread/clive-barkers-jericho-multiplayer),
+  [Steam](https://steamcommunity.com/app/11420/discussions/0/846963710897727939/),
+  [GameFAQs](https://gamefaqs.gamespot.com/boards/934444-clive-barkers-jericho/41226885).
+- MAK-PIVO/jericho-coop (MIT, last push 2026-10-21; the repository is no longer public
+  since 2026-10-22, its work lives on in Jericho Co-op 0.2.1+), a fork of a pre-0.2.0 build that later merged 0.2.0 back: Steam lobbies,
+  shared QTEs, snapshot interpolation, door/object and power sync, a control watchdog, a
+  large-address-aware exe flag, boss hits and Rawlings' powers from clients, the melee
+  slow-motion fix. These were adapted into 0.2.1 with credit (the LAA flag set by the
+  installer on the retail exe only, with the original kept). Not taken: its in-memory
+  single-instance patch (the test proxy already handles that through an environment
+  variable) and, for now, its redesigned online-only lobby (it drops split screen).
+- SMOD, a modding toolkit and rules pack: https://www.nexusmods.com/clivebarkersjericho/mods/2.
+  The co-op mod detects it and plays by the host's SMOD rules when every player has it.
+
+## How the game works (for co-op)
+
+- **Scripts:** the gameplay is Lua 5.1. Archives `*.packed` (BFPK) hold `*.lc` files, which
+  are a u32 header plus zlib-compressed stock Lua 5.1 bytecode with debug info. All 1533
+  files decompile with unluac. Each level has its own `scripts/` (map, triggers, enemies,
+  scenes).
+- **Command line:** `-Name:value` sets any `game.cfg` variable. `-InitLuaLine:"..."` runs Lua
+  after `init.lua` once and is then cleared. The mod re-arms it from its own tick, so it
+  runs on every level. `dofile` works with absolute paths to loose files.
+- **Engine netcode:** the exe still has Scrapland's UDP client/server and a Lua `Net`
+  library, but the join packet expects Scrapland ship data and the server crashes
+  (`newpos<=size`, FileSys\FileMem.cpp:46). The mod does not use it. It carries its own
+  transport in a `dinput8.dll` proxy and rewrites unused `Net` Lua entries to point at it.
+- **Squad:** characters are `WalkChar` entities. `UsrControl` 0 is the local player and -1
+  is AI; `oAI.bEnable` toggles the AI. With the AI off, `InCtrl_Walk`/`InCtrl_Str` and
+  `Ang` move a body with its own animations, which is how remote players are shown. Actions
+  with root motion (`UseDisp`) must not move a remote body, or it drifts from the snapshots.
+- **Frame hook:** the `OnRenderDebug` variable names a Lua function called every rendered
+  frame. It is independent of game time, unlike `Game.AddScheduledFunc`, so it keeps
+  running under slow motion.
+- **Cutscenes:** there are 40 in-engine scenes. First-person scenes animate first-person arms
+  for one character (`FP_<Char>`) and full bodies for the others (`<Scene><Char>`). Video
+  intros are Bink files. QTEs are Lua callbacks of the scene, so they can be routed to one
+  player, auto-passed or offered to everyone.
+- **Split screen leftovers:** the engine still has Scrapland's split screen code. With a
+  second player entity and per-view render calls, each frame draws one player's view in turn
+  (each view at half the frame rate). Jones's astral projection holds the game's one set of
+  controls, so the other player's body is driven from its own gamepad by the mod meanwhile.
+- **Camera units:** `FCam.Ang` is set in radians, but every camera's `camAng` reads in
+  degrees. Hide a model with `bObjectVisible`. Entity property names sit as strings in the
+  exe next to `TimeSpeed` and `EntityLink`.
+- **Single instance:** the game refuses a second copy with `FindWindowA("MercuryGameClass")`
+  inside SecuROM code. For tests, the proxy DLL makes that call return NULL when an
+  environment variable is set. The exe's code is never patched.
+- **Unfocused window:** the game pauses when its window loses focus. Test mode fakes the
+  foreground and swallows deactivation. It also stops reading keyboard, mouse and DirectInput
+  while unfocused, so the owner's typing never reaches the game.
+- **Hiding a body:** while a character's `bCheckFPSVisible` is set, the engine decides its
+  visibility itself and ignores `bObjectVisible`: a squad member is drawn, the player's own
+  body is hidden in every view (recorded). With `bCheckFPSVisible` off, `bObjectVisible`
+  works. Scenes hide characters with `Active = 0` (which also stops them).
+- **First-person models:** `0FP_<char>` / `1FP_<char>` follow the camera of the user in their
+  hidden `id` field and are drawn in every view; the engine resets their `bObjectVisible` and
+  `Active` every frame, but keeps `id`. Split screen hides each player's arms from the other
+  half by giving the model an unused user (3) there. Game scripts read `Game.UsrEntity(fp.id)`,
+  so that call has to map it back. Flags and ids set in Lua take effect in the frame after
+  next, i.e. for the other split screen view.
+- **Archives and loose files:** `Pack1.packed` next to `Data0*.packed` is mounted by the
+  game and can carry animations and models, but not textures (a level then hangs while
+  loading). SMOD moves the archives to `Packed\` and reads loose files; that layout does
+  not read Pack1, so built files must also go next to the game's own there. SM3 strings
+  are length-prefixed and the chunk size fields are 0, so a texture path in a model can
+  change length in place (TrueRoss's rifle textures pointed back at Jones' folder).
+- **game.log** lists every texture the engine could not find ("Texture not found"), which
+  shows as checkered or flat-coloured surfaces: the mod's test runs compare it against the
+  game's own missing ones.
+- **Steam:** the game is not on Steam with networking; the mod runs as Valve's sample app
+  Spacewar (AppID 480) through a pinned `steam_api.dll` only when a player picks Steam. Steam's
+  overlay then answers the game's XInput with empty pads (Spacewar is a Steam Input app); the
+  proxy reads pads through a private copy of `xinput1_4.dll` while the overlay is loaded.
+
+Detailed session notes: [NOTES.md](NOTES.md).
+
+## What we changed
+
+All of it lives in the mod repo. On the player's PC the installer only adds files, sets the
+large-address-aware flag in the retail exe's header and builds `Pack1.packed` (and, with
+SMOD, loose files) from the player's own game files; everything it replaces is backed up and
+restored on uninstall.
+
+- **Transport:** ENet on a background thread (LAN discovery, direct IP), or Steam lobbies and
+  P2P messages, chosen by the host when creating the game. Lua sees the same `Net.Coop*`
+  functions either way.
+- **Session:** "Co-op" main menu entry, host/join screens per network, lobby (character,
+  nickname, ready, chapter or co-op save, split screen player 2), session settings
+  (difficulty, enemy toughness, character-only actions, QTE mode, AI squad damage, cutscene
+  view), version check between players, separate co-op saves.
+- **Host authority:** the host runs enemies, story triggers, scenes, saves and level changes;
+  clients get snapshots (20 Hz, timestamped and interpolated), events and a catch-up when
+  they join late. Client hits, uses, revives, powers (telekinesis, runes, fire, ghost bullets,
+  Ababanili...), doors and destroyed objects reach the host's world.
+- **Story:** character-only actions are offered to the player who owns that character, with an
+  AI fallback; story parts written for the AI stand-in were extended so a player can hold them
+  (Brandenburg gate, the bunker restoration, Act 1 with Ross). Players beyond the living squad
+  become "spirits" that can take a free body.
+- **Cutscenes:** everyone watches at once with the original camera; skipped only when every
+  player skips. An experimental "own eyes" view plays each scene first-person from the
+  player's character, with directed gaze and the scene's character retargeted from its
+  first-person animation.
+- **Split screen:** a second local player with its own view, HUD and gamepad, in hosted and
+  joined games, hot-plug of gamepads, astral projection both ways.
+- **Bosses and powers over the network** (adapted from the fork): a client's hit on a boss
+  that only takes damage on a weak part carries the part's bone; Rawlings' curse, calm and
+  heals act on the machine that controls the target.
+- **Robustness:** a client whose controls stay taken outside a scene or story part gets them
+  back after 12 s; a client left without a body after a skipped scene gets it back; a player
+  cut off by a door or passage the story shut behind the others is offered to rejoin.
+- **Story steps per machine (0.2.2):** level scripts written for "the player" run on every
+  machine for that machine's own body. Steps that would lock, turn or walk a remote player's
+  body are left to that player (a turn and a hint, with the AI as fallback); invisible
+  blockers that levels switch off at the end of a talk follow the host.
+- **Enemies (0.2.2):** the engine gives enemies targets only among AI-driven squad members;
+  the host now offers them the nearest human too. Enemy generators run on the host only.
+- **Squad orders per player (0.2.3):** the engine's area manager and the squad's "follow me"
+  follow only local user 0. Each fire team (Alpha, Omega) now has a leader: in Act 1 Ross's
+  player leads everyone, after that the first player whose character is in a team leads it,
+  and a team without one goes to a player who leads nothing yet; AI members follow their
+  leader with the game's own chase behaviour, and "hold" pins them. In a story split the AI
+  follows the player it is with.
+- **Objects (0.2.3):** every prop the map places (whatever its name) breaks for everyone;
+  one pushed, knocked over or thrown comes to rest where its mover's machine says, through
+  the host. A player joining later gets both.
+- **Story split sides (0.2.3):** while a story split is in progress the host tells everyone
+  which characters are on which side; a downed player moves only into a free body on their
+  own side, else waits for Rawlings' revive.
+- **Updates (0.2.3):** the installer's shortcut runs a small PowerShell launcher: it reads
+  the latest release from the GitHub API, downloads its zip only from the project's release
+  URLs, checks it against the asset's SHA-256 digest, runs the new installer unattended and
+  starts the game (through Steam when the copy is a Steam install); offline it just starts.
+- **Languages (0.2.2):** the mod's texts and SMOD's menu entries in the game's six
+  languages, converted to the game's code page (cp1252, or cp1251 for the Russian release);
+  the game's own aspect ratio option extended rather than a new one added.
+- **Installer:** a window with its steps, a progress bar (also on the taskbar button) and the
+  minutes left, in six languages; finds the game, backs up what it replaces, updates and
+  uninstalls. It
+  carries Python's embeddable build, so it can build the cutscene animations and a fixed
+  Ross model from the player's own game files, and it marks the retail exe large address
+  aware (original kept and restored).
+- **Bug reports:** F11 saves the last 30 seconds as a Motion-JPEG AVI (frames scaled on the
+  GPU, JPEG through Windows' WIC on a worker thread, kept in memory).
+- **Player souls (0.2.4):** the host is Ross's soul and the second player Jones's astral
+  projection (the game's own lore: Jones projects into others and uses their abilities); both
+  switch bodies freely as in the original, the projection is cut while Jones is held (lost,
+  possessed, caged). Players 3-4 keep their character; the other bodies are greyed out in
+  their squad menu. The menu's fields are write-only from Lua (reading one is an engine error
+  that returns nil), so the mod repeats the game's own test for a selectable body.
+- **Display settings (0.2.4):** display mode (full screen, window, borderless window) and the
+  refresh rate as rows of the game's own Video settings, applied on its Accept and dropped on
+  Cancel; a borderless window is a frameless window over the monitor, set through hooks on
+  window creation and the D3D9 present parameters.
+- **One engine fix (0.2.4):** the last boss's fire spirit (Ababanili, steering at
+  `0x4fc9b0`) takes a new prey with no check; with every player near it down or bound by the
+  rune (which the single-player game never reaches) it read NULL and the game crashed. A
+  vectored exception handler resumes that one read on the function's own "no target" path,
+  only when the bytes there match the retail exe. The exe file is not changed.
+- **No mouse needed (0.2.5):** the game itself stops with "Mouse not found" when DirectInput
+  cannot create the system mouse (`CreateDevice(GUID_SysMouse)` fails on a PC with gamepads
+  only). The proxy's DirectInput hook then returns a device of its own that reports a mouse
+  that never moves, so a TV split screen setup starts.
+- **Game folders with any name (0.2.5):** the engine opens files through the ANSI code page,
+  so the mod's folder is passed to Lua as the lossless code page form, else the 8.3 short
+  name, else a path relative to the working folder (the shortcut and Steam start the game in
+  the game folder; some drives have 8.3 names turned off).
+- **A clean exit (0.2.6):** the engine's last `Release` of the D3D9 device shows a modal
+  "A D3D object has a non-zero reference count" box when anything still holds the device. The
+  proxy hooks the device's `Release` (vtable slot 2) and, once the count is down to the
+  engine's own last few references, frees its F11 recorder, capture and split screen surfaces
+  first.
+- **Split screen HUD on wide screens (0.2.7):** the shape-keeping HUD layout (each user's HUD
+  viewport shrunk to the whole screen's shape, its corners moved to the screen's edges, and
+  the 2D batcher's last batch drawn in the viewport it was made for) is used in the wide view
+  too, where it had been left out: there the HUD was twice as wide as high and each player's
+  message line blinked into the other half.
+- **Frame cap and the switch flight (0.2.7):** with the game's own cap off and no vertical sync,
+  the proxy waits before `Present` to hold the screen's refresh rate (twice it in split screen,
+  where each view gets every other frame). The squad switch's soul flight ended in the frame it
+  started (co-op does not slow the world) and the game deleted the camera the engine was
+  drawing with ("Check failed: GetActiveCamera() != this" in split screen); its end now waits
+  0.1 s.
+- **Body states across a level change (0.2.7):** states a client sent in the last level reach
+  the host after its load, and the host relays every player's state to everyone; the client
+  drove its own split screen player's body, a puppet for the first second until the split
+  screen takes it, to the last level's place, outside the new map. The host now takes a peer's
+  states only after its "level loaded" message, a client none in its first second and no
+  relayed copy of its own bodies.
+- **Enemy events that call the AI (0.2.7):** clients mirror the host's enemy actions, so the
+  animation events run there too; four classes end appear/disappear with a call into their AI
+  (`oAI:OnAfterDisappear()`), which with the client's AI off reached a stale pointer (a crash
+  once in about ten runs of one story split). On a client those events skip the AI call and
+  keep their effects.
+- **Updating any earlier version (0.2.6):** installs without an install record (0.1.0 was
+  a zip extracted into the game folder) are recognised by the proxy's own marker string and
+  their files; the installer then updates or removes them like a recorded install and never
+  keeps an older mod's file as the game's original.
+- **A short trigger pull plays out on the watcher too (0.3.0):** the owner reported pistol
+  shots with no animation for the watching player. Cause: Delgado's Raging Bull shot in third
+  person starts with a 1.4-1.7 s wind-up (`Shot0Init`) and fires only if the trigger
+  (`owc.Shot`) is still held at its end (`Delgado.EndOfBullShot`); a press lasts 0.1-0.5 s, so
+  the copy raised and lowered the pistol without firing. Fix: a puppet keeps the trigger down
+  through the wind-up and the first shot, and a wind-up is cut to 0.3 s on a puppet
+  (`cfg.puppetholdshot`, `cfg.puppetskipinit`). Before: short press 1 shot for the owner, 0 for
+  the copy; long press 5 and 3. After: 1 of 1 (shot after ~0.4 s), long press 4 of 4 plus
+  `Reload0`.
+- **Second weapon and fire modes (0.3.0):** weapons that fire on a weapon switch use a second
+  trigger (`owc.SecondWeaponTrigger`: pistol / Bull, Rawlings' pistols, Black's grenade
+  launcher); the state message carries it (22nd field) with the fire mode and the charge type
+  (23rd field). A puppet's magazines are refilled, so Black's one-round launcher shows every
+  volley. Reloads: `Reload0` for the second weapon of Delgado, Black, Jones and Ross, `ReloadE`
+  for Rawlings' fragmenting and explosive loads. Rawlings' ghost heal shows `ShotH_GH`, Vlad's
+  course `Special1`, the heal `ShotH`; Church's sabre strikes `Combo1Hit1/2` are played once
+  each. Delgado's dragon from his case could not be reproduced as missing: with a real gamepad
+  the watcher sees the case, the arm (`Shot1Init`, `Shot1`, `Shot1EndAlt`, slot 2), the fire,
+  the spirit and the arm closing.
+- **Gestures for actions without a third-person twin (0.3.0):** orders, fire-mode switches,
+  Cole's mine mode pick and detonation, levers, doors, the pillbox, landing, QTE strikes and
+  Rawlings' calm map to existing actions (`Relax1/2/0`, `Reload`, `Hack`, `Punch`,
+  `DuckRelaxInit`, `HitStrong`); `CoopAnim.FPMAP` in the mod. Each has a switch in the config
+  (`gapgestures`, `gaporders`, `gapmodes`, `gaplevers`, `gapfall`, `gapqte`, `gapcalm`, ...).
+- **SMOD Add-ons (0.3.0):** detected at run time by the globals it defines (the lobby is
+  tagged "[SMOD+]"); its third-person mode is refused in split screen, in scenes and when
+  downed, and the third-person twins of the add-on's powers are replayed on the watcher.
+  The add-on's balance changes and third person inside a session are not synced unless every
+  player has it, and that is not a priority. SMOD (SkacikPL) and its Add-ons (PHM2D) are
+  credited in the mod's readme; none of their files is in the mod.
+- **Player 2's attacks in Act 1 (0.3.1):** in the chapters before Ross's death the mod builds the
+  first-person weapons of every squad member except Ross for the level. Such a first-person model,
+  given to player 2, played none of its actions until the screen had once been whole after it was
+  made: the shots left the gun but there was no shot, reload or sabre animation, so the first
+  magazine was the last and Rawlings did not fire at all. Now, when player 2 takes such a squad
+  member, the screen is whole for about a second (each gamepad keeps driving its own player). Three
+  smaller faults on that path went with it: the wrong first-person model passed to the game inside
+  player 2's attacks, a squad member player 2 takes keeps what its AI was doing, and player 2's HUD
+  is built again when the game turns the crosshair and ammo counter on.
+- **Filled split screen halves (0.3.1):** on 16:9, 16:10 and 4:3 screens each half used to show the
+  whole normal picture at half size with black bars at its sides. Each half is now filled by
+  default, without stretching: the view in a half is wider and less high than the whole screen's.
+  A new row in the game's Video screen, **Split screen**, has *Fill* (default), *Fill (closer)* and
+  *Whole picture* (the old look); it is kept with the aspect ratio, applies after Accept and is in
+  all six languages. The name over the other player sits over their character again, and the mod's
+  Video rows no longer run off the right edge on 4:3 and 5:4 screens (shorter texts, a test checks
+  the length in every language).
+- **Bug report in one click (0.3.1):** `coop\Collect logs.bat` in the game folder puts one zip on the
+  desktop: the mod's logs of the last five sessions, the game's log, the install record, versions
+  and file hashes, Windows and graphics card and driver, and the names (not contents) of the mod's
+  files. Windows user and computer names, folder paths, player and Steam names, Steam IDs, e-mail
+  and MAC addresses and public IP addresses are removed; nothing is sent anywhere.
+- **Nicknames as UTF-8 (0.3.2):** nicknames travel as Unicode and each game shows them in its own
+  font: a Russian nickname appears in Latin letters on a German, French, Spanish or Italian game
+  ("Борис" as "Boris"), "Jürgen" as "Jurgen" on the Russian one. Before, a nickname typed in
+  Russian kept only a few letters, and `|`, `;` and `:` could get into a nickname and break the
+  lobby's messages (they cannot now). A player without a nickname is named by each screen in its
+  own language (lobby, nameplates, squad choice cards).
+- **Texts in the player's language (0.3.2):** the "character needed here" request, the squad choice
+  cards, the reason why Steam is unavailable, the shortcut's "update could not be installed"
+  message and the installer's error lines were in English or in the host's language; they follow
+  the player's language now, and a test checks every text the mod adds in all six languages.
+- **Other mods' DLLs (0.3.2):** another mod's `bin\dinput8.dll` (an ASI loader such as Ultimate ASI
+  Loader, or any other) is kept in `coop-backup` and is off while co-op is installed, and the
+  installer's result says so (for an ASI loader also that its plugins are off). The loader cannot be
+  chained under another name for Jericho, see the lesson below. A `dinput8.dll` another mod puts
+  over the co-op one later is kept by the next update and left in place by the uninstaller (up to
+  0.3.1 the update overwrote it and the uninstaller deleted it). Other mods' `d3d9.dll`,
+  `dsound.dll`, `version.dll`, `xinput1_3.dll` and `winmm.dll` are never touched. The zip's file
+  names use `/` (some unzip tools warned about the backslash names of 0.3.0 and 0.3.1).
+- **SMOD and the game's language (0.3.2):** SMOD sets the game's language itself at every start
+  (`SelectedLanguage = "English"` in its `autoexec.lua`, and it skips the language screen), so with
+  SMOD the game and the co-op texts are English. The mod does not change SMOD's files; a German,
+  French, Spanish or Italian installer tells the player which word to write on that line.
+- **Texts reviewed in all six languages (0.3.3):** Church, Cole and Black are women, and the
+  Russian story texts now decline them so (up to 0.3.2 they were declined as men); names are
+  written as the game writes them, and the mod's in-game texts use no « » and no long dash, as the
+  game's own Russian texts use none and its font may lack them. German says "Sie" and Spanish "tú"
+  everywhere (some lines, the SMOD hint and the setup exe said "du" / "usted"), French and Italian
+  use the feminine forms for the three women, the translations use the game's own names (the
+  Firstborn, Alpha and Omega, the squad), and French and Spanish one name for each place. The text test checks every text in the six languages (format directives, the game's code
+  page, quotes).
+- **Bug-report collector and setup exe in 16 languages (0.3.3):** the window of
+  `coop\Collect logs.bat` (where the zip went, what it holds, what was removed, the Issues link,
+  the error messages) follows the game's language, which the mod's log now names at every start,
+  else Windows' language; the report inside the zip stays in English for the developers. The setup
+  exe's messages (a damaged download, PowerShell blocked, the installer window not started) follow
+  Windows' language in 16 languages instead of six.
+- **The other player's actions in split screen (0.3.4):** both characters of a split screen are
+  real bodies of one game, and the game shows a player's reload, melee strike or power only on
+  that player's own first-person arms, so the other half saw the character standing still. Each
+  half now sees the other player reload, strike and cast on the character (Church's blood spell,
+  Black's telekinesis, Rawlings's heals ...); a spell's life cost and a strike's hits still count
+  once, and one player's screen effect (Cole's power) stays in that player's half.
+- **A skip vote per player (0.3.4):** up to 0.3.3 a PC was one vote, so either player of a split
+  screen skipped a scene for both. Now split screen player 2 votes with their own START (player 1
+  with START or Esc), and the vote message names the voter (the client's player 1 or 2). The line
+  "Skip scene: 1 of 2 players" had never been drawn over a scene (the game hides its label line
+  while a scene plays); it now shows and names the player on this PC who still has to press.
+- **Who is still loading (0.3.4):** the black screen at a level start says "Waiting for
+  <name>..." with the nicknames of the players still loading.
+- **Cole's grenades and mines on every PC (0.3.4):** the other players saw Cole's throw but no
+  grenade, no mine and no blast. The thrower's PC now sends the grenade's start (place, speed,
+  angles, mode), its resting place and its blast through the host; every other PC flies a
+  passive copy with no explosion or damage of its own, puts a resting mine where it came to rest
+  and shows the blast and its shake where it went off. The damage is still counted once, by the
+  thrower's PC.
+- **A partner off the screen (0.3.4)** gets a marker at the side of the view
+  ("< Name 25 m" / "Name 25 m >"), in each half of a split screen too; Jericho has no map.
+- **Rewards for joining players (0.3.4):** the game's artwork unlocks (50 / 100 / 250 melee
+  kills, ghost bullet kills, enemies blown up, the level pictures) were earned only by the host.
+  A client's hit now carries the kind of kill (melee, ghost bullet, an explosion's direct target),
+  the host credits a kill of that kind to the client's own counter, and the level pictures the
+  host unlocks at a level's end unlock for every player. Players of 0.3.3 and 0.3.4 do not play
+  together (the lobby's version check), so no older version has to read the new messages.
+- **Development:** a Lua console into the running test game (UDP on 127.0.0.1, test runs
+  only), reached on the second PC over ssh.
+
+### Lesson: an ASI loader renamed to `winmm.dll` can never work for a game that Windows shims
+
+Ultimate ASI Loader picks its role by its file name and also serves `winmm.dll`, which
+`Jericho.exe` imports before `dinput8.dll`; so chaining a foreign loader under that name (our
+`dinput8.dll` first, the loader as `bin\winmm.dll`) looked like a way to keep other mods' ASI
+plugins running next to co-op. It cannot work here: Windows applies its compatibility settings to
+`Jericho.exe` (`apphelp.dll`, `AcLayers.dll` and `AcSpecfc.dll` load first and import WINMM) and
+maps the system's `winmm.dll` before the exe's own imports are resolved, so a `bin\winmm.dll` is
+never loaded, with co-op or without it. Seen on two PCs: on Windows 10 (LTSC 19044) the game's
+module list showed `SYSTEM32\WINMM.dll` and no `bin\winmm.dll`, and a test plugin behind the
+loader never ran (as `bin\dinput8.dll` it did); on Windows 11 (build 28000) a debugger's
+load-order view of the exe showed the same order. A chain built that way (a pre-release build
+copied the loader to `bin\winmm.dll`) was never released; 0.3.2 keeps the foreign loader off and
+says so. Check a game's load order before promising a chain; a game without shims is different (the
+same chain works for TimeShift in our tests). Source:
+[docs/releasing.md](https://github.com/dolbaras/jericho-coop/blob/main/docs/releasing.md).
+
+## QA
+
+Test runners in the mod repo's `tools/` (`run_pair.ps1`, `run_bot.ps1`, `run_menu_pair.ps1`,
+`level_smoke.ps1`, `storylines.ps1`, `puppet_jitter.py`) plus the workspace's LAN runners.
+Every check is a scripted run with log assertions; test windows are muted and on the second
+monitor, two game instances are never run on the same PC with D3D.
+
+Results for 0.3.4 (2026-11-16), two test PCs on a local network (the host on one, a client on the
+other, the same video settings on both), live checks on the release build:
+
+- Live, split screen: player 2's spell, reload and strikes seen on the character in player 1's
+  half and the other way round; the spell's life cost taken once; player 2 moves normally
+  afterwards; one player's screen effect (Cole's power) only in that player's half.
+- Live, the skip vote: a real Esc on the host's keyboard, a real START on the client's gamepad and
+  on a split screen player 2's gamepad; the line shown over the scene on both PCs; the scene ended
+  on both after the last vote.
+- Live, a real QTE scene (the Behemoth's death, Church's four QTEs) with Church held by the client
+  and pressed on its gamepad: the client's branches (wrong keys, then right ones) played on the
+  host too, and the scene ended on both within a second.
+- Live, Cole's grenade thrown on the client: shown on the host, the blast where the client's went
+  off, the enemy's life lowered once (one hit sent, one applied); a client's 50th melee kill
+  counted on the client (MeleeKills 49 -> 50); the level-start screen naming the client while it
+  loaded; the off-screen marker in full screen and in both split halves.
+- Live, the whole campaign, 33 levels, with the host ending each level the real way and the client
+  (with a split screen player 2) following every one: no crash, no script error. Split screen with
+  two gamepads, player 2 as Delgado and as Rawlings pressing every button: no crash, no script
+  error. The Co-op menus (root, host, lobby, session settings, join, Video) in Russian and English.
+- Offline: the Lua mock tests (17 files; `grenade_mock_test.lua` and `hud_mock_test.lua` are new),
+  the text test (1219 checks), the installer tests (56 checks, with the published 0.3.3 as the
+  old version, updated by this installer), the ASI loader test (13), the setup exe's self-test (87
+  files equal to the zip) and its install / reinstall / uninstall test, and the bug-report
+  collector's own test (114 checks). Every published version 0.1.0, 0.2.2, 0.2.9 and 0.3.3
+  updated by this installer and then removed (the folder ends as the clean game), also in a chain
+  (0.2.9 -> 0.3.3 -> 0.3.4) and removed by the new installer directly.
+- The update: before the publication the published 0.3.3, installed into a test folder with two
+  shortcut folders, updated itself to 0.3.4 through its own launcher from a local copy of the
+  release feed (the download checked against its SHA-256, both shortcuts kept and refreshed), then
+  was removed back to the folder as it was. After the publication the published 0.3.3 launcher
+  updated a stand-in folder through the real GitHub feed: 10 of 10 checks, on a hidden desktop.
+- Not covered by the lab runs: a whole boss fight with a client against the boss's own AI, the
+  joining players' level pictures and ghost bullet and grenade rewards in a running game, the
+  grenade's flight on a picture, the other players' sounds, and Steam between two networks.
+
+Results for 0.3.3 (2026-11-11), the test PC of 0.3.2 below (Windows 10, Russian game copies), nothing
+played by hand:
+
+- Offline: the Lua mock tests (15 files), the text test (1219 checks: every text in the six
+  languages, the same format directives, the game's code page, the quotes), the installer tests
+  (56 checks, among them the 0.3.2 release installed over an ASI loader and then updated by this
+  installer), the ASI loader test (13), the setup exe's self-test (87 files equal to the zip) and
+  the bug-report collector's own test (114 checks). The DLL is the published 0.3.2 one.
+- The update: the published 0.3.2, installed into a test folder with two shortcut folders, updated
+  itself to 0.3.3 through its own launcher (the download checked against its SHA-256, both shortcuts
+  kept and refreshed), then was removed back to the folder as it was.
+- Live, the Russian game: the Co-op menu, Host, the lobby, the session settings, Join, the Video
+  menu, the hint lines and three squad choice screens; every letter drawn, nothing cut off; the log
+  names the language as the collector reads it.
+- Live, German on a copy with the SMOD Add-ons' German texts: the rows and the choice cards fit.
+  That copy draws with the Russian edition's font, so its umlauts (the game's own German texts too)
+  came out as Cyrillic letters.
+- `Collect logs.bat` in a Windows 10 console window: Russian, German, Polish, Czech and Hungarian
+  drawn letter for letter; Japanese prints its English lines too where the console's font has no
+  Japanese.
+- Not run: the whole-campaign and two-PC regression, split screen, Steam. German, French, Spanish
+  and Italian letters on their own editions are proven by the text test, not by eye.
+
+Results for 0.3.2 (2026-11-09), one test PC (Windows 10, the game in Russian), a clean copy of the
+game, nothing played by hand:
+
+- Offline: the Lua mock tests (15 files, including the nickname test, 146 checks), the installer
+  tests (including an update from 0.3.1), the text test over all six languages (1245 checks) and the
+  ASI loader stand-in tests (15 of 15). The package was built from a clean clone, 87 zip entries, none
+  with a backslash in its name, and scanned for personal data.
+- Live, with Ultimate ASI Loader 10.0.2 and a test plugin: as `bin\dinput8.dll` alone the plugin
+  loads; co-op installed over it starts to the menu, the loader is kept in `coop-backup`, the result
+  page says so, and removal puts every file back (no difference beyond the game's own log files). With
+  the loader as `bin\winmm.dll` (alone and with co-op) the plugin never runs and co-op starts with
+  the file untouched.
+- Live, a session with the mod's test client as the second player: the host "Борис Х" and the
+  client "Jürgen Ёж" intact in both lobbies, Ready, start at Rom_Tepidarium, the client's nameplate
+  on the host's Russian screen as "Jurgen Ёж" (a German game shows "Jürgen Yozh"; read from the HUD
+  item's state, the captures of this PC came out black), removal.
+- Not run: the whole-campaign and two-PC regression, split screen, Steam. The rest of the mod is
+  the 0.3.1 code.
+
+Results for 0.3.1 (2026-11-07), the same test PC, two gamepads, the Russian game, as a player does it:
+
+- Installed with the setup exe into a clean copy, started through the "Jericho Co-op+" shortcut
+  (its launcher found no newer release and started the game), Co-op, Host, Chapter 1 with player 1 as
+  Black and player 2 as Church, the opening scenes played in full. Player 2 emptied the submachine
+  gun's magazine, reloaded, fired again and struck with the sabre (F11 clips); the screen was whole
+  for about a second when player 2 took Church. With the fix switched off the same run is stuck after
+  the first magazine.
+- The three split screen views chosen in the Video screen of the main and pause menus (Accept keeps,
+  Cancel drops, kept after a restart); the Video rows fit on a 1280x1024 screen after a text
+  shortening this check found; `Collect logs.bat` made its zip; the game's own exit.
+- The update 0.3.0 to 0.3.1 through a 0.3.0 install's shortcut (from a local copy of the release:
+  download, checksum, installer window, game start) and the removal (the folder equal to the clean
+  game again).
+- Offline: 13 Lua simulation test files, the log collector's tests 95 of 95, a personal-data scan of
+  the zip's text files.
+- Not run as a player: a body change of player 2 inside Chapter 1 (covered by lab runs), the
+  whole-campaign regression.
+
+Results for 0.3.0 (2026-11-01):
+
+- Live animation checks between a PC with a virtual gamepad (ViGEm) and a second PC as host and
+  watcher, frames of the watcher's screen from an F11 clip plus the watcher's log (which action
+  the copy played): every weapon, fire mode, reload, melee strike, power and gesture of
+  Delgado, Black, Cole, Church, Jones and Rawlings; characters under AI in a real 60 s fight
+  (shots of all weapons, the Bull's wind-up, minigun, reloads, cover, hits, agony); trance and
+  stun on frames. SMOD Add-ons 1.1: load (no Lua error, 0 engine errors), a mixed session,
+  third person through the add-on's toggle, Delgado's pistol, dragon and barrier in third person.
+- Regression on the final code: eleven Lua mock tests, the whole campaign 33/33 levels over a
+  LAN (34 loads on the client), the virtual gamepad suite (9 runs, 0 engine errors), nine split
+  screens (errors 0, no crash), player souls twice, player 2 waiting, no mouse, 2 x 60 squad
+  switches in split screen, both Lost Patrol branches, the exit through the menu.
+- Packaging: every version 0.1.0 to 0.2.9 installed, updated to 0.3.0 and removed (13 of 13,
+  game folder equal to the clean one), the setup exe (extract, quiet install, reinstall, removal),
+  the update from 0.2.9 through the shortcut from a local feed with the exe listed first
+  (the zip is taken), 81 zip entries audited.
+- Not seen on real objects: Delgado's dragon under AI, a real QTE, real levers, doors, the
+  pillbox and Cole's mines (the first-person actions were fired from the console), Rawlings'
+  calm, Ross in act 1, the SMOD Add-ons tests that need both PCs, the real P key and a Steam
+  session with two accounts.
+
+Results for 0.2.6 (2026-10-24):
+
+- The release regression as for 0.2.5 (whole campaign 33/33 levels over a LAN, split screen
+  with virtual gamepads, a real Steam session, nine story splits, player souls, player 2
+  waiting, no mouse), with the same results.
+- The exit through the game's own menu call on the installed package: ends in 1 s in the main
+  menu, after an F11 clip and in a split screen level (the 0.2.5 DLL stops on the box).
+- Every published version installed as players had it (0.1.0 extracted, 0.1.1+ by their own
+  installers), then updated to 0.2.6 and removed: one by one and all nine in a row, the game
+  folder equal to the clean game afterwards; each also removed directly by the new installer.
+- The update from 0.2.5 through its shortcut, from a local feed and from the real GitHub
+  release (checksum matched).
+- The player souls test showed a downed third player not revived within 12 s in some runs;
+  an A/B with the 0.2.5 DLL showed the same (Rawlings' AI on the host does not always come):
+  fixed in 0.2.7.
+
+Results for 0.2.7 (2026-10-24):
+
+- Whole campaign by two players over a LAN between two PCs with a split screen player on the
+  joining PC: 33/33 levels, no crash, on the final code (version 0.2.7); gamepads, a real
+  Steam session, all nine story splits, the player souls test twice, player 2 waiting,
+  starting without a mouse.
+- The split screen player's fall at Rom_Coloseum (owner, campaign test): the client log showed
+  bodies moved 6000-87000 units at 10 of 33 level starts; after the fix the host dropped the
+  last level's states at every level start and no body moved across levels in the campaign.
+- A client crash in one story split (WWII_PillBoxes, `AccessViolation at 04A0400B`, the
+  psychic commander's AI call): after the fix the commander's disappear/appear events were
+  forced six times on a joining PC and the last boss split ran, no crash.
+- Rawlings for a downed player 3-4: the host has the AI Rawlings heal a body he left waiting;
+  every souls run revived (one of the first four by that fallback).
+- The squad switch in split screen: the engine stop reproduced within 19-37 switches with the
+  released 0.2.6, none in 3 x 60 and the final 2 x 60 after the fix (lab/splitswitch.ps1).
+- Frame cap measured: 120 frames a second in split screen on a 60 Hz screen, 60 without it.
+- Split screen HUD in the wide view (wider than 1.85): before and after pictures of a level
+  in a 1912x1001 window (lab/splithud.ps1), a hint for one player in their half only, a screen
+  fade over the whole half; then every split screen test again with the new DLL.
+
+Results for 0.2.5 (2026-10-23):
+
+- Whole campaign by two players over a LAN between two PCs: 33/33 levels to the ending, no
+  crash; split screen with virtual gamepads; a real Steam session; all nine story splits and
+  the player souls test as for 0.2.4.
+- Each fix checked in the game: player 2's gamepad not moving player 1 while player 2 waits
+  for a body (before and after); player 2 moving on once Rawlings is held by the last boss's
+  rune while a tutorial's switch lock changes nothing; a body left after a wait acting on its
+  own again once revived; split screen starting when a body frees up; a start with
+  DirectInput's mouse failing (the pad still plays); a game folder with a Greek letter on both
+  PCs (short name on one, relative path on the other, whose drive has no 8.3 names); Auto
+  refresh back to 75 Hz and a borderless window kept until restart.
+- A clean install, removal (exe back to the retail hash), and the update from the published
+  0.2.4 through its shortcut, from the real GitHub release. That test found the install
+  record's shortcuts written as one joined line since 0.2.3 (removal left them, the next
+  update could stop with an error); fixed and read back from old records.
+- Re-published the same day: the main menu's co-op label covered the game's "Press [ENTER] or
+  START" line, and in a 4:3 window on a 16:9 monitor it was laid out for 16:9. Checked at
+  16:10 and 4:3, with and without SMOD, in background test runs (no keys, window captures);
+  the update from 0.2.4 again, from the real GitHub release.
+
+Results for 0.2.4 (2026-10-23, final code):
+
+- Whole campaign by two players over a LAN between two PCs: 33/33 levels from Alk_Desert to
+  the ending, no crash; split screen with virtual gamepads; a real Steam session between two
+  accounts.
+- All nine story splits with a real host and client. One crashed the host at the last boss
+  (the engine read above); after the fix, the same split and a forced test of that read
+  (every Ababanili losing its prey each frame for two minutes) ran without a crash.
+- Player souls on two PCs: the roles, a third player's other bodies greyed out and the aim
+  switch refused, the second player moving freely, the projection cut and freed, a downed
+  third player waiting and revived.
+- Display settings: in full screen on the second PC a 60 Hz rate and Auto back to the
+  monitor's 75 Hz; in the main and pause menus the restart notice for a mode change, and
+  Cancel applying nothing.
+- A clean install from the release zip, and the update from the published 0.2.3 through its
+  shortcut (checksum matched, shortcut renamed).
+
+Results for 0.2.3 (2026-10-23, final code):
+
+- Whole campaign by two players over a LAN between two PCs: 34 level loads to the ending,
+  no crash; nine combinations of graphics options with no engine error or missing texture.
+- All nine story splits played with the second PC hosting the character who goes on (the
+  story line driven step by step) and this PC's game joined as the one left behind: each
+  split's waves, sides and notices started and ended on both, a fallen player never moved to
+  the other side. The test found one split that set its sides only from a trigger players can
+  bypass.
+- Both branches of the Lost Patrol by playthrough bots, the merge and its scene skip included.
+- Breaking and moving objects both ways; squad leaders with a host and a joining player.
+- The update path: the installer's shortcut from 0.2.2 to the published 0.2.3 (checksum
+  matched), a bad checksum (the game starts on the old version), offline (3 s).
+
+Results for 0.2.2 (2026-10-22, final code):
+
+- Whole campaign over a LAN between two PCs (host on a second PC, client here with a split
+  screen player 2): 33/33 levels to the ending, 0 Lua errors, 0 engine errors, no crash.
+- Split screen with two virtual gamepads (ViGEm): astral projection by either player,
+  gamepads plugged in and out, every character's buttons for player 2. This suite had been
+  passing while the game crashed after its checks (a melee hit, 4 runs in 6, also in 0.2.1);
+  runs are now also checked for their full length, and the crash is fixed (6/6 full runs).
+- Steam between two real accounts on two PCs: lobby, join, a level played.
+- SMOD, the co-op and Clive Upscaler's textures (with DXVK) on both machines: jumps seen at
+  full height, the host's crouch and stand-up on the client, Act 1's Ross; no fault.
+- Remote bodies' height against their owner's: 20-42 units off before (in or above the
+  floor), 0-2 after (45 samples per body).
+- Each fix from the first human session checked between the two PCs, most with virtual
+  gamepads and recordings; the new menu choices, hints and the installer window gone through
+  like a player and checked on screen (installer in all six languages, install, update,
+  removal, closing during an install).
+
+## How to play
+
+Download a release from https://github.com/dolbaras/jericho-coop/releases, run
+`Install Co-op.bat`, start the game, choose Co-op. Host: Host game, pick the network (local
+network or Steam) and a chapter, Create session. Others: Join (local network) or Join through
+Steam. Over the internet without Steam the host forwards UDP 28100 or everyone uses a
+virtual LAN. PhysX legacy 9.12.x or 9.13.x is needed on modern Windows
+([Steam thread](https://steamcommunity.com/app/11420/discussions/0/846945955298387706/)).
+
+## Known issues
+
+- One human session over Steam so far (missions 1-8, on 0.2.x); a tester's split screen report on
+  0.3.0 led to 0.3.1. The full campaign has been run by scripts, not finished by people (last on
+  0.3.4, between two PCs), and 0.3.1 to 0.3.3 were only checked on one test PC. Story scripts that
+  assume one player are fixed per level as playtesting finds them. A report from that session (a
+  cutscene taking a client's controls while the host walked) could not be reproduced.
+- In a split screen game without network players, player 2 joins after the level's opening
+  scene, so player 1 alone can skip that scene.
+- Split screen: a climb, a lever or a door use of the other player still shows no third-person
+  gesture of its own (the game has none; the closest is played); Delgado's dragon arm and Cole's
+  squad re-arm (Reequip) are not mirrored; Delgado's fire barrier flames are not shown (the
+  barrier itself works).
+- Joining a session that is already in a level is not available; lifts and moving set pieces
+  are each PC's own (not synced in time).
+- The 0.3.3 texts were seen in the running game in Russian (the 0.3.4 menus in Russian and English); German only on a copy that draws with
+  the Russian edition's font, so German, French, Spanish and Italian letters on their own editions
+  are proven by the text test, not by eye.
+- Steam is tested between two real accounts on one LAN; across networks (Steam relay) and
+  Join Game auto-launch (game not running) are not tested yet.
+- Animations seen by the watching player were checked on screen for the main weapons and powers
+  of each character; a few first-person-only actions (real levers, doors, the pillbox, Cole's
+  mines, Rawlings' calm) are shown as a gesture that was only fired from the console, not on
+  the real object. The pose of a fall is the engine's.
+- Other mods' ASI plugins do not run next to co-op (see the lesson above); only a loader under a
+  name that Windows does not shim for the game could change that, and none is known for Jericho.
+- With SMOD the game starts in English unless SMOD's `autoexec.lua` is edited (see 0.3.2 above).
+- Split screen draws the two views on alternate frames, so each runs at half the frame rate.
+- The "own eyes" cutscene view is experimental: the sets were built for one camera, and it
+  falls back to the original camera where a character cannot see the scene.
+
+## Next steps
+
+- Possible later: other names a loader serves that the game loads late (`msacm32.dll`, `msvfw32.dll`
+  are not preloaded by the shims), only with a live check that the plugins load.
+- Fix what human playthroughs report (real gamepads, Steam between real accounts); open items
+  are tracked in the mod repo's issues.
+- A boss fight with a client against the boss's own AI, and the split screen gestures the game
+  has no third-person twin for (climbs, levers, doors, Delgado's dragon arm, Cole's re-arm).
+- A full co-op playthrough by people, written up, would move this to `verified-playthrough`.

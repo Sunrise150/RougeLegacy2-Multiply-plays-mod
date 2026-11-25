@@ -1,0 +1,7 @@
+{
+    "Name": "RL2.API",
+    "Author": "TacoConKvass",
+    "Version": "2.1.0-a",
+    "ModAssembly": "RL2.API.dll",
+    "LoadAfter": []
+}

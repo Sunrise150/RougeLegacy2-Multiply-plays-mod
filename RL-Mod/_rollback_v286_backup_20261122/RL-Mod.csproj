@@ -1,0 +1,140 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
+  <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
+  <PropertyGroup>
+    <Configuration Condition=" '$(Configuration)' == '' ">Debug</Configuration>
+    <Platform Condition=" '$(Platform)' == '' ">AnyCPU</Platform>
+    <ProjectGuid>{08FC2021-F9D8-476E-B0FB-817D6D054ADA}</ProjectGuid>
+    <OutputType>Library</OutputType>
+    <AppDesignerFolder>Properties</AppDesignerFolder>
+    <RootNamespace>RL_Mod</RootNamespace>
+    <AssemblyName>RL-Mod</AssemblyName>
+    <TargetFrameworkVersion>v4.7.2</TargetFrameworkVersion>
+    <FileAlignment>512</FileAlignment>
+    <Deterministic>true</Deterministic>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Debug|AnyCPU' ">
+    <DebugSymbols>true</DebugSymbols>
+    <DebugType>full</DebugType>
+    <Optimize>false</Optimize>
+    <OutputPath>bin\Debug\</OutputPath>
+    <DefineConstants>DEBUG;TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <PropertyGroup Condition=" '$(Configuration)|$(Platform)' == 'Release|AnyCPU' ">
+    <DebugType>pdbonly</DebugType>
+    <Optimize>true</Optimize>
+    <OutputPath>bin\Release\</OutputPath>
+    <DefineConstants>TRACE</DefineConstants>
+    <ErrorReport>prompt</ErrorReport>
+    <WarningLevel>4</WarningLevel>
+  </PropertyGroup>
+  <ItemGroup>
+    <Reference Include="0Harmony">
+      <HintPath>Libs\0Harmony.dll</HintPath>
+    </Reference>
+    <Reference Include="Assembly-CSharp">
+      <HintPath>Libs\Assembly-CSharp.dll</HintPath>
+    </Reference>
+    <Reference Include="BepInEx">
+      <HintPath>Libs\BepInEx.dll</HintPath>
+    </Reference>
+    <Reference Include="LiteNetLib">
+      <HintPath>Libs\LiteNetLib.dll</HintPath>
+    </Reference>
+    <!-- v2.5.1: 净室逻辑层源码直接内联编译进主 DLL，不再引用外部 RL-Mod.Core.dll。
+         原因：netstandard2.0 程序集在 Unity 2020.3/.NET4.x Mono 下类型加载失败
+         （Could not find method due to a type load error），导致收包/握手全废。
+         Core 源码是纯 C#，按源码内联后运行期零跨程序集依赖；测试项目仍单独引用 Core 工程。 -->
+    <Reference Include="System" />
+    <Reference Include="System.Core" />
+    <Reference Include="System.Xml.Linq" />
+    <Reference Include="System.Data.DataSetExtensions" />
+    <Reference Include="Microsoft.CSharp" />
+    <Reference Include="System.Data" />
+    <Reference Include="System.Net.Http" />
+    <Reference Include="System.Xml" />
+    <Reference Include="UnityEngine">
+      <HintPath>Libs\UnityEngine.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.CoreModule">
+      <HintPath>Libs\UnityEngine.CoreModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.InputLegacyModule">
+      <HintPath>Libs\UnityEngine.InputLegacyModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.IMGUIModule">
+      <HintPath>Libs\UnityEngine.IMGUIModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>Libs\UnityEngine.UI.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.AnimationModule">
+      <HintPath>Libs\UnityEngine.AnimationModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.TextRenderingModule">
+      <HintPath>Libs\UnityEngine.TextRenderingModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.ParticleSystemModule">
+      <HintPath>Libs\UnityEngine.ParticleSystemModule.dll</HintPath>
+    </Reference>
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>Libs\UnityEngine.Physics2DModule.dll</HintPath>
+    </Reference>
+  </ItemGroup>
+  <ItemGroup>
+    <Compile Include="Plugin.cs" />
+    <Compile Include="ControlPanel.cs" />
+    <Compile Include="Downed.cs" />
+    <Compile Include="CoOpRescue.cs" />
+    <Compile Include="EnemySync.cs" />
+    <Compile Include="EnemyPositionSync.cs" />
+    <Compile Include="BossProgressSync.cs" />
+    <Compile Include="SkillTreeSync.cs" />
+    <Compile Include="RoomTravelSync.cs" />
+    <Compile Include="PlayerHurtSync.cs" />
+    <Compile Include="RemoteHurtbox.cs" />
+    <Compile Include="RemoteTargetProxy.cs" />
+    <Compile Include="CoOpFixes.cs" />
+    <Compile Include="NetValidation.cs" />
+    <Compile Include="NetClock.cs" />
+    <Compile Include="EnemyAliveSync.cs" />
+    <Compile Include="ObstacleSync.cs" />
+    <Compile Include="SceneChangeSync.cs" />
+    <Compile Include="DashFxSync.cs" />
+    <Compile Include="PauseCompat.cs" />
+    <Compile Include="ConfigProfiles.cs" />
+    <Compile Include="MpHub.cs" />
+    <Compile Include="MainMenuHubButton.cs" />
+    <Compile Include="PauseMenuHubTab.cs" />
+    <Compile Include="SaveInfoView.cs" />
+    <Compile Include="ChatPanel.cs" />
+    <Compile Include="HubButtonHover.cs" />
+    <Compile Include="NetworkManager.cs" />
+    <Compile Include="PlayerSync.cs" />
+    <Compile Include="SeedSync.cs" />
+    <Compile Include="MapSync.cs" />
+    <Compile Include="CharacterSync.cs" />
+    <Compile Include="RaceMode.cs" />
+    <Compile Include="Score.cs" />
+    <Compile Include="ProjectileSync.cs" />
+    <Compile Include="RoomFix.cs" />
+    <Compile Include="Players.cs" />
+    <Compile Include="Properties\AssemblyInfo.cs" />
+    <!-- v2.5.1: RL-Mod.Core 净室逻辑源码内联（替代外部程序集引用） -->
+    <Compile Include="..\RL-Mod.Core\Sync\ClockSync.cs">
+      <Link>Core\ClockSync.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Sync\SnapshotBuffer.cs">
+      <Link>Core\SnapshotBuffer.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Sync\Interp.cs">
+      <Link>Core\Interp.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Protocol\Validation.cs">
+      <Link>Core\Validation.cs</Link>
+    </Compile>
+  </ItemGroup>
+  <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
+</Project>

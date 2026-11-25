@@ -1,0 +1,19 @@
+# Build output
+.vs
+[Bb]in
+[Oo]bj
+*.csproj.user
+
+# Setup tool
+RL2.ModLoader.DevSetup
+RL2.Dev.targets
+
+# Packaged files
+package
+
+# Sublime text project
+*.sublime-workspace
+*.sublime-project
+
+#VSC
+.vscode/

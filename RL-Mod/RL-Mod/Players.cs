@@ -32,6 +32,12 @@ namespace RL2Multiplayer
         public bool Offline;
         public float OfflineSince;
 
+        // v1.9.4：客机 IP，用于重连时校验身份 + 房主踢人显示
+        public string Ip = "";
+
+        // v2.8.6：联机显示名，由对端通过 PlayerName 消息告知；空 = 对方还没报名字
+        public string Name = "";
+
         public void ClearRaceState()
         {
             Ready = false;
@@ -51,10 +57,14 @@ namespace RL2Multiplayer
             GoldCollected = 0;
         }
 
-        /// <summary>紧凑标签：主机 / P2 / P3 …</summary>
+        /// <summary>紧凑标签：优先用对方自定义名字，没报到则 主机 / P2 / P3 …</summary>
         public string Tag
         {
-            get { return Id == 0 ? "主机" : ("P" + Id); }
+            get
+            {
+                if (!string.IsNullOrEmpty(Name)) return Name;
+                return Id == 0 ? "主机" : ("P" + Id);
+            }
         }
 
         /// <summary>界面显示名（自己显示为"你"）。</summary>

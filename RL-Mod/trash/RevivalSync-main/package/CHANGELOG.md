@@ -1,0 +1,638 @@
+*Made by Revival*
+
+**Source code / report bugs / help develop:** https://github.com/Vladtheosis/RevivalSync
+
+# 1.6.1 — Host Assist follows a drop until it lands
+
+- **Dropped and thrown things no longer shift after they land (Host Assist).** The host
+  used to stop following what you let go of after 0.4 seconds — usually while it was still
+  in the air — so its copy finished the fall its own way and yours was then pulled over to
+  match. Most visible on long objects like a bat or a shotgun. The host now follows until
+  your copy has come to rest.
+- Both players need 1.6.1 for Host Assist.
+- Instant Weapons is still experimental and off by default.
+
+# 1.6.0 — Host Assist is automatic, Instant Weapons
+
+- **Host Assist now switches itself on** whenever the host also has RevivalSync — nothing
+  to set up. What you hold is sent straight to the host, so its copy of your cart or loot
+  follows yours instead of trailing behind, and throws fly the same on every screen. With
+  a host that does not have the mod, nothing changes. **Recommended: everyone in the lobby
+  installs RevivalSync, same version.** The `Host Assist` switch forces it off.
+- **New option: "Instant Weapons (experimental)"**, off by default. Guns and melee weapons
+  follow your hand instantly again, this time by running the game's own aiming, turning
+  and swinging on your side for the weapon you hold (including scroll-wheel swings and
+  recoil), so it keeps matching the game after updates. Shots and hits are still decided
+  by the host. With Host Assist the host's copy of your weapon follows yours too. Leave it
+  off and weapons behave as in 1.5.4.
+- **Fixed: the Cleanup Crew's bomb head** could be left lying around as a ghost you could
+  pick up after it had exploded. It is driven by the host now, like other enemy parts.
+
+# 1.5.4 — weapons and drones
+
+- **Guns and melee weapons work properly again.** The game's November update moved how
+  weapons aim, turn and swing into code that only runs on the host, so in your hand they
+  sat in the wrong pose, scroll-wheel swings did nothing on your screen, and a thrown
+  weapon jumped about as it was corrected. Weapons are now handled by the game itself, the
+  same as for a player without the mod: correct, but with the usual host delay in the hand.
+- **A switched-on drone is handled by the host even while you hold it**, so it no longer
+  sits still in your hand while it is really flying to its target.
+- **Fixed: an item dropped by a drone could fall through the floor** (until you pressed the
+  resync key). It happened when you threw the item to a waiting drone.
+
+# 1.5.3 — Host Assist: scripted items left to the host
+
+- **Host Assist no longer takes over items and trap valuables.** It replaced everything the
+  host does to whatever you hold, which is right for carts and ordinary loot but wrong for
+  anything with its own behaviour: gun recoil, melee swings, the way tools straighten in
+  your hand, and the jolts and shakes of trap valuables (scream doll, phone, ice saw...)
+  were being cancelled for every player. Those are now left to the host, exactly as they
+  work without Host Assist. Carts and plain loot are unchanged.
+- Works with a host still on 1.5.2, but both players on 1.5.3 is best.
+
+# 1.5.2 — Host Assist: carts
+
+- **Host Assist now actually works for carts.** The host's own cart steering was
+  overwriting it every tick, so a pushed cart still ran about a metre ahead of the host's
+  copy at sprint speed. The host now applies your cart's state after its own steering.
+- **Letting go no longer makes the cart (or a thrown item) correct itself.** The host's
+  copy used to jump to your position on release. Now your game keeps sending for a short
+  moment after you let go and the host glides onto it, while your own copy is left alone.
+- Both players need this version for Host Assist.
+
+# 1.5.1
+
+- **Shut doors now open the moment you pull them.** A closed door was held shut on your
+  screen until the host confirmed it had opened — about a quarter of a second — so quick
+  tugs did nothing and the door then popped open late. The mod now opens (and shuts) it
+  on your screen straight away; the host still has the final say.
+
+# 1.5.0 — Host Assist (experimental, off by default)
+
+- **New option: "Host Assist (experimental)"**. When the host AND you both run RevivalSync
+  with it switched on, the item or cart you hold is sent straight to the host, and the
+  host's copy follows yours instead of trailing a moment behind. Throws use your own
+  release, so they fly the same on every screen and have nothing to settle afterwards.
+  With a host that does not have it, nothing changes. The host only accepts it from the
+  player actually holding the object, and only within a few metres of its own copy.
+  First version — needs two modded players to test; please report how it feels.
+
+# 1.4.3 — full code review
+
+- Checked against the November game update: everything the mod relies on is still there.
+- **Vehicles driven by other players no longer get dragged around by "Smooth Enemies".**
+  The game now predicts those vehicles itself, and the mod's smoothing was pulling them
+  back to an older position every frame. The mod now leaves anything the game is
+  predicting alone.
+- **Trajectory Matching: no more forward lurch on hard throws.** The first steering step
+  after you let go was comparing against stale data and shoved the item forward (by about
+  a metre's worth on a hard throw) before correcting itself. It also no longer
+  overshoots the host's path after a speed correction.
+- **Self_Hosted_Photon fix actually works now.** The 1.3.3 fix for its region page had a
+  mistake that made it crash in the same place; corrected.
+
+# 1.4.2
+
+- **New: "Reset All Settings To Default"** (section 3. Debug). Turn it on and every
+  RevivalSync setting goes back to its default, then the switch turns itself off again.
+  Works from REPOConfig or by editing the config file. (In REPOConfig, the "Reset To
+  Default" button at the top of the settings list does the same thing — the "Revert"
+  button only undoes changes you have not saved yet, which is why it can look broken.)
+
+# 1.4.1
+
+- **Trajectory Matching keeps following through bounces.** In 1.4.0 a thrown item stopped
+  following the host's path the first time it touched anything — on average after a third
+  of a second — and the old sync took over, which pulls a still-moving item back toward
+  where the host had it a moment ago. That was the "meh" part. It now follows through
+  bounces and slides until the item comes to rest on both screens.
+
+# 1.4.0 — Trajectory Matching (experimental, off by default)
+
+- **New option: "Trajectory Matching (experimental)"** in section 1. Thrown items now
+  follow the host's flight path while they are in the air, instead of flying on your
+  screen alone and then settling to where the host has them once they land. Carts you
+  push get the same treatment for real disagreements (say, the host's cart catching on a
+  doorframe) — the ordinary lag trail is left alone, so the cart still feels instant.
+  The trick is comparing the host's view with where *your* item was at the same moment,
+  not where it is now. Anything that bounces off something goes back to the normal sync.
+  Off by default: flip it on and off in the same session and tell us which feels better.
+- Code cleanup: removed two leftover internal timers that no longer did anything.
+
+# 1.3.3
+
+- **Self_Hosted_Photon works on game v0.5.0.** Its region page (the way you host on your
+  own Photon server) called a Steam login function the game removed in v0.5.0, so the page
+  crashed instead of loading. RevivalSync now runs that page with the game's new login
+  call. Only applies while Self_Hosted_Photon still has the old call — an updated version
+  of it is left alone.
+
+# 1.3.2
+
+- Verbose logs now record your ping. How tight a held cart feels depends directly on
+  connection lag, so this makes "it felt better last time" reports answerable.
+
+# 1.3.1 — mod compatibility
+
+- **CartSpeedSync is not supported and is now switched off automatically.** It pushes the
+  cart along while you sprint, but with RevivalSync your own copy of the cart is the one
+  being steered, so it ran ahead of the host's real cart: held carts drifted about twice
+  as far and flung loot. RevivalSync already makes carts instant — you can uninstall it.
+- **Works properly alongside REPO Fidelity now.** One of REPO Fidelity's performance
+  shortcuts skipped the cart-handle code on clients, which silently turned off Instant
+  Cart Handle (cart grabs went back to waiting on the host). RevivalSync removes just that
+  one shortcut; everything else in REPO Fidelity keeps working.
+
+# 1.3.0 — ported to game v0.5.0
+
+- **Works on R.E.P.O. v0.5.0 again.** The update changed how the host sends object
+  positions (one compressed packet per object instead of separate values), which switched
+  RevivalSync off. The mod now lets the game unpack each packet itself and reads the
+  result, so small format tweaks in future updates should not break it again.
+- This version is for game v0.5.0 and newer only. On an older game version it switches
+  itself off.
+- Other players' tumbles (Q) are no longer extra-smoothed: since v0.5.0 the game itself
+  ignores that data from anyone but the host, so there is nothing for the mod to smooth.
+- **First build on the new game version — please report anything odd** (with Verbose
+  Logging on and your LogOutput.log attached).
+
+# 1.2.24
+
+- **Not yet working on game v0.5.0.** The update rewrote how the game syncs objects, so
+  RevivalSync detects the change and switches itself off — your game plays as vanilla.
+  It needs a proper port to the new system before it does anything again.
+- When it switches itself off it is now *completely* off. Since v0.5.0 a small part of
+  the mod (its per-frame loop) kept running even after "disabled itself" — that no
+  longer happens.
+
+# 1.2.23
+
+- Audit fix: the "cart carries its cargo" behaviour added in 1.2.21 now applies only to
+  loot the mod is deliberately leaving alone. Loot that is running its own correction
+  was being moved twice in the same instant — once with the cart, once by its own
+  correction pulling it back — which is exactly the tug-of-war that used to make loot
+  rattle in the basket. Parked-cart loot settles on its own and no longer gets the ride.
+
+# 1.2.22
+
+- **Fixed objects teleporting for no reason (a bug introduced in 1.2.15).** The safety
+  net that rescues a stuck object was also counting *rotation*, which was meant for
+  carts — a cart parked in the right spot but turned 90 degrees really is desynced. But
+  it applied to everything, and a mug or a weapon resting at a slightly different angle
+  than the host sees is completely normal. So ordinary loot that was already in the
+  right place got teleported every few seconds: one session logged 52 of these on
+  objects sitting 0.1–1.3m from where the host had them (before 1.2.15: zero). That is
+  what made items pop through shelves, jump out of your hands, and land somewhere odd.
+  Rotation now only counts for carts, which is what it was written for.
+- **Other players' tumbles (the Q roll) are now smoothed.** A player's body is streamed
+  by that player, not by the host, and the smoothing only ever accepted data from the
+  host — so tumbling players were the one thing on screen that never got smoothed and
+  stepped at the raw network rate. Your own body is unaffected.
+
+# 1.2.21
+
+- **Loot no longer pops out of the cart and sticks to the side.** The real cause: loot
+  riding in a cart is deliberately left alone by the network (correcting it individually
+  is what used to make it rattle) — but the cart itself was still being corrected, and
+  those corrections move it instantly, straight through anything in the way. So when
+  someone else pushed the cart, your copy of the basket slid out from under its own
+  load and left it wedged against the outside. The cart now carries its cargo through
+  every correction, so the load stays in the basket.
+- **The cart cannon and cart laser no longer go limp in the cart.** They are held upright
+  and aimed by host-only logic that a client never runs, so the only thing keeping one
+  standing was the host's streamed rotation — which the cargo rule above was
+  (correctly) withholding. They now use the game's normal sync, like drones and
+  vehicles, so they stay upright without spamming the resync key.
+
+# 1.2.20
+
+- Cart fixes, from reading a real session log. Two causes:
+  - The "Teleport Distance" setting can no longer be set dangerously low (minimum is
+    now 4m, default stays 6m). A cart you steer naturally rides up to ~3m from where
+    the host has it; with the distance set below that, the cart teleports constantly —
+    which is what made carts feel weak on stairs (yanked back down), fling their loot,
+    and clip through you. If yours was set low it will move up to 4m on next launch;
+    6 is recommended.
+  - RevivalSync now warns if CartSpeedSync is installed. RevivalSync steers carts
+    locally on its own now, and CartSpeedSync steers the same cart on top of that
+    (doubling the turn rate and boosting sprint speed), so the two fight. Remove
+    CartSpeedSync, or turn off "Instant Carts" if you prefer to keep it.
+
+# 1.2.19
+
+- The Resync Loot Key is now a normal text box in the REPOConfig menu instead of a
+  slider you had to scroll through every key on the keyboard to change. Just type the
+  key name: F8, K, Mouse3, Keypad5, LeftAlt, and so on. Type None to turn it off.
+  Common spellings (space, esc, ctrl, a bare digit like 5) are understood too
+- Second full audit pass: re-verified every game field and method the mod reflects into
+  against the current game version — all correct
+
+# 1.2.18
+
+- Full code audit. Fixed: the upgrade diagnostics added in 1.2.17 were never actually
+  switched on, so they recorded nothing (1.2.17's upgrade fix itself was working)
+- Diagnostics can no longer throw errors into the game under any circumstance
+- The Thunderstore release description no longer carries the old "expect game-breaking
+  bugs" wording, which contradicted the current one
+- README now documents the F8 emergency resync
+
+# 1.2.17
+
+- Upgrade orbs are now left completely alone by the mod. R.E.P.O. decides who permanently
+  gets an upgrade purely on the client side: it goes to whoever's game thinks THEY were
+  holding the orb when Interact was pressed, and the host never checks that claim. The
+  mod's instant grab makes your game believe you're holding something with no wait for
+  the host, so when two players are grabbing at the same orb (exactly what passing one
+  over looks like) your client won that race and took the upgrade. Holding an orb never
+  needed instant physics, so the mod now stays out of it and vanilla decides
+- Added diagnostics for upgrade handling, so if an upgrade still lands on the wrong
+  person the session log records who claimed it and why
+
+# 1.2.16
+
+- Fixed upgrades applying to the wrong player: after an upgrade item was knocked out of
+  your hand (e.g. by hitting another player with it), your client could keep believing
+  you were still holding it — and then every E press you made, anywhere on the map,
+  silently used that item in your name. When another player then popped the upgrade, the
+  game credited YOU. The mod now always cleans up its "who is holding this" bookkeeping
+  on every kind of release, with a safety sweep each physics tick
+
+# 1.2.15
+
+- Fixed carts syncing position but staying rotated 90 degrees off: the game's own cart
+  logic (stabilization etc.) was running locally for carts nobody here was holding and
+  fought the rotation sync. It now only runs for a cart YOU hold. The stuck-loot
+  teleport backstop also counts rotation now, so a wrongly-angled cart gets rescued
+  like a wrongly-placed one
+- Fixed loot sliding off carts during stop-start pushing: cargo no longer flips between
+  riding-free and synced every time the cart pauses (each flip jostled the load) — it
+  stays riding until the cart has been calm for a moment
+- Loot the host adds to a not-yet-synced cart should no longer press against the outside
+  of the basket: that came from the cart's wrong rotation putting the host's cargo spots
+  outside your basket, fixed above
+
+# 1.2.14
+
+- Held objects now follow NetworkingReworked's rule too: while you're holding something,
+  the network doesn't touch it at all. The drift correction (which fought the normal
+  ping-trail and acted as a brake — the old "ultra slow cart") and the wedge-snap (which
+  mistook a paused cart's trail for a stuck object and teleported it out of your hands)
+  are both gone. One safety remains: if the host's copy is hopelessly far away for over a
+  second it's snagged on something, so control returns to the host
+- Removed the now-meaningless "Held Object Correct At" setting
+
+# 1.2.13
+
+- Loot syncing rebuilt on the original NetworkingReworked's code (credit: readthisifbad).
+  Objects you aren't holding are simply eased toward the host's last known state every
+  physics tick — position, rotation and both velocities — and that's the entire algorithm,
+  the same one the old mod used. Everything layered on top of it over 1.2.x (predicting
+  the target by ping, idle detection, deadbands, velocity steering, wedge timers) each
+  fixed one symptom and caused the next, because they all made the sync target move
+  between packets. A still target converges smoothly and can't fight the physics
+- The host's position is also taken exactly as sent again, instead of being projected
+  forward by network lag — that projection was behind the vibrating and jittering reports
+- Kept on top of it: the stuck-loot teleport backstop, the resync key, throw grace, cart
+  cargo riding free, and the pooled-object guard
+
+# 1.2.12
+
+**Still experimental:** this mod predicts physics on your machine, so occasional oddities
+(an item in the wrong spot, a door disagreeing with the host, strange loot behaviour) can
+still happen. It should play fine otherwise, nothing breaks a run permanently, and every
+feature can be switched off individually in the config.
+
+- Cart cargo rebuilt on the original NetworkingReworked's model (credit: readthisifbad):
+  while a cart is being used, the loot inside it now gets NO network correction at all —
+  it just rides in the basket on local physics, the way it did in the mod that worked.
+  Every version that tried to correct loot mid-haul failed in its own way (rattling,
+  sliding out, fighting the basket). When the haul ends, the load settles back into sync
+  item by item, staggered, so nothing jerks
+- Fixed valuables teleporting around the level: the game parks deactivated objects far
+  above the map, and the mod was syncing toward that parking spot — flinging objects
+  into the sky and snapping them back. One session did this 272 times to the same
+  scenery. Pooled objects are now left alone
+
+# 1.2.11
+
+- Fixed slippery cart loot for real: cargo was being pulled toward where the host has it
+  in the WORLD, but the host's copy of a moving cart trails yours by your ping — so every
+  tick the loot got shoved backwards out of the basket. Cargo is now corrected relative
+  to its own cart, so the lag cancels out and items simply sit where the host has them
+  inside the basket. Anything genuinely out of place is returned to its spot
+- Stopped thousands of pointless teleport-snaps: some objects (dead players' heads above
+  all) get flagged as teleporting by the host every few frames even when nothing moved —
+  one session logged 3710 of them for a single head. Only real teleports act now
+
+# 1.2.10
+
+- Fixed loot lying beside the cart while the host sees it inside: cart cargo now gets a
+  gentle keep-in-the-basket pull (strong enough to stay aboard, soft enough not to
+  rattle), and the stray-snap tightened to 2m
+- Fixed objects resting in the wrong place forever: an object that fell asleep away from
+  the host's position was immune to every correction — sleeping objects now wake up
+  whenever they slept more than half a meter from where the host has them, then glide home
+- Fixed laggy drone carrying: drones are now simulated like normal items while you hold
+  or carry them (instant hand feel) and only hand over to the host while actually flying
+  (toggled on) or magnet-carrying something
+
+# 1.2.9
+
+- Found the standing desync: loot riding in carts ran pure local physics with NO safety
+  net, and in a busy lobby carts are always "in use" — cargo drifted unboundedly and
+  nothing ever corrected it (this is why the 5-second teleport never fired). Riders now
+  snap back whenever they stray more than 3m from the host's position
+- Fixed the feather drone properly: the game's override system (mass/drag/torque) turned
+  out to be host-only INSIDE the method that applies it — every override the mod set on
+  clients was silently ignored. The original NetworkingReworked patched this exact
+  method; now we do too. Feather-carried loot finally feels light
+- New: Auto Resync Seconds (default 0 = off) — set it and the mod presses the resync
+  key for you automatically at that interval, no more F8 spam
+- Note: the drone itself flying with a slight delay is by design (it pilots itself, so
+  the host owns it, like enemies)
+
+# 1.2.8
+
+- Fixed the drone handoff for real: 1.2.7's version fought the player's own grab (the
+  feather drone exists to HELP you carry — you hold the piano while the drone lifts it)
+  and looped register/unregister hundreds of times, which was the "insane desync".
+  New rule: your grab always wins; while you carry a feather-lifted object the mod
+  applies the drone's lightweight physics locally so it feels light for you too; only
+  objects held by the drone ALONE go host-driven
+- New: Resync Loot Key (default F8, configurable) — press to instantly teleport every
+  synced object to exactly where the host sees it. The emergency desync fix, inspired
+  by the original NetworkingReworked's hard sync (credit: readthisifbad)
+- New: convergence backstop — any object that stays more than 1.5m from the host's
+  position for over 5 seconds teleports there, guaranteed. Loot always ends up where
+  the host sees it
+
+# 1.2.7
+
+- Fixed magnet drones (Feather etc.) making objects immovable: the drone applies its
+  physics (half mass, zero gravity, drag) on the host only, so your locally-simulated
+  copy stayed at full weight fighting a floating host copy. Following the mod's
+  ownership rule — the host owns whatever provides its own motion — a drone-grabbed
+  object now hands itself back to vanilla sync until the drone releases it
+- Note: if the whole game feels laggy/desynced, check that the switches in config
+  section "1. Main" are ON — they are the mod. All four had been switched off in
+  testing, which plays exactly like vanilla (laggy doors and all)
+
+# 1.2.6
+
+- Held carts can no longer vanish from your hands: the anti-stuck teleport mistook a
+  busy lobby's normal multi-meter trail (cart paused, host copy catching up) for a
+  wedged object and "freed" it to the host position mid-grab. Carts are now fully
+  exempt from that teleport, other held items need much stronger evidence, and the
+  cart handback tolerance scales up for high-traffic lobbies
+- Session logs are now archived automatically to BepInEx/RevivalSync-logs (newest 10
+  sessions, refreshed every minute during play) — bug evidence survives restarts and
+  crashes for troubleshooting
+- Reminder: if any feature misbehaves for you, every part of the mod can be switched
+  off individually in section "1. Main" of the config — in-game via the REPOConfig
+  mod's menu, or in BepInEx/config/com.Revival.revivalsync.cfg
+
+# 1.2.5
+
+- Interim release, number used outside this changelog
+
+# 1.2.4
+
+- Loot in carts no longer rattles: cargo now rides in pure local physics whenever the
+  cart is in use by ANY player or still rolling (previously only your own cart counted) —
+  the original NetworkingReworked's cargo rule, adopted with thanks
+- Door jitter fixed for real this time: host authority over door angles is now applied
+  through angular velocity (joint-friendly) instead of rotation forcing, which fought
+  the hinge joint and the door's own spring 50 times a second
+- Objects should no longer fall through floors on clients: simulated objects get
+  continuous collision detection, so fast corrections and hard throws can't tunnel
+  through thin geometry
+- Known issue still under investigation: objects passing through other players and loot
+  misbehaving near them — client-side logs from an affected session will pin it down
+  (Verbose Logging on, send the LogOutput.log)
+
+# 1.2.3 — first stable release
+
+- Fixed doors and cupboards drifting out of sync with the host: the door's own auto-close
+  spring (which runs locally) counted as "local motion" and blocked syncing — an open
+  cupboard would quietly close itself on your screen while staying open for the host.
+  The host's door angle is now continuously authoritative; only YOUR pushes, grabs and
+  the settle right after them go local (so opening things stays instant)
+- Known issue: doors/cupboards can still occasionally appear desynced from the host —
+  this is ongoing work. Reports with Verbose Logging on are very welcome
+
+# 1.2.2
+
+- Thrown objects no longer snap to the host's landing spot after they fall: for 3 seconds
+  after a throw the "wedged object" teleport is disabled (bounces legitimately land in
+  different spots on each machine), and settling toward a resting host copy is capped to
+  a calm glide speed instead of a zip
+
+# 1.2.1
+
+- Thrown objects no longer stop mid-air "catching their breath": the sync target is now
+  led by your one-way ping (the host's copy always trails a moving object by exactly
+  that), and after the throw grace corrections fade in gradually — the object follows
+  the host's flight smoothly instead of braking toward its trailing position
+- Fixed weird shop doors: releasing a door was going through the throw pipeline
+  (throw grace + host-state overwrite), which masked the host's true door state — a
+  locked shop door would reconcile toward where YOU left it instead of where the host
+  keeps it. Doors are now fully exempt from throw handling
+
+# 1.2.0
+
+- The client controls what it touches: weapons, grenades and gadgets are back under
+  local simulation for the true singleplayer feel — 1.1.9's blocklist made every tool
+  you actively use feel host-laggy in hand. Weapon orientation is computed locally from
+  each weapon's own aim/tilt tuning (no network data in the rotation loop, so none of
+  the old glitching), gadgets mirror the host gently, and damage/explosions remain
+  host-decided like vanilla
+- Only genuinely self-moving objects stay on the game's normal sync: vehicles, drones,
+  and the duck
+
+# 1.1.9
+
+- Adopted the original NetworkingReworked's item policy wholesale (credit: readthisifbad):
+  weapons, powered gadgets (anything with a battery), grenades, mines, drones, upgrades
+  and vehicles are never simulated — they use the game's normal sync, which is simply the
+  reliable answer for objects with complex logic of their own. Correct orientation and
+  behavior, at the cost of a small hand lag on those items only
+- Simple items (health packs and plain carryables) keep the instant hand feel and
+  predicted throws
+
+# 1.1.8
+
+- Fixed undrivable vehicles: the new drivable vehicles (Semiscooter etc.) were being
+  synced toward the host's lagging copy while you drove them. Vehicles are now fully
+  excluded from the simulation — they use their own driving physics and networking
+- Fixed glitchy weapon hold: holding the host's rotation at full strength telegraphed
+  every 10-per-second, ping-late network step. Guns and melee weapons now compute their
+  hold orientation locally from their own tuning fields (aim offset, tilt) — the same
+  numbers their scripts use — so there is no network data in the rotation loop at all.
+  Other gadgets keep a gentle host mirror that can't telegraph steps
+
+# 1.1.7
+
+- Tool hold is now firm, not floppy: pointing the grab controller at the right rotation
+  (1.1.6) wasn't enough — the game's base orientation torque is deliberately gentle.
+  Host-side weapons feel firm because their scripts stack a 2x torque boost and heavy
+  rotation damping on top; the mod now applies that exact recipe (the gun's own values)
+  while holding the host's rotation
+
+# 1.1.6
+
+- Tool straightening finally works at full strength: the game's grab system re-captures
+  its orientation target from the object's current rotation every frame, which silently
+  cancelled every previous attempt that steered the object directly. The mod now writes
+  the grab controller's own target (the same channel weapon scripts use) with the host's
+  straightened rotation — the game's own tuned torque does the driving
+
+# 1.1.5
+
+- Config rebuilt for humans: section "1. Main" has plain on/off switches (Instant Carts /
+  Instant Doors / Instant Items / No Timeout Kicks / Smooth Enemies), "2. Fine-Tuning"
+  holds the numbers with plain-language explanations (defaults are good), "3. Debug" has
+  Verbose Logging for bug reports. NOTE: settings from older versions reset to defaults
+  once (the old entries are ignored); re-apply any personal tweaks in the new sections
+
+# 1.1.4
+
+- Tool straightening is now strong: it was switching itself off whenever the host's copy
+  rested (no packets = no hold, and the game's torque crept the tool crooked again). The
+  host's straightened rotation doesn't expire like positions do — the hold is now
+  constant while you carry the tool, with roughly twice the corrective strength
+
+# 1.1.3
+
+- Held tools now STAY straight: the game's default grab torque wants a different
+  orientation and was shoving the tool off the host's straightened rotation. We now do
+  what the game's own weapon scripts do while imposing orientation — neutralize that
+  torque and heavily damp rotation — then hold the host's rotation unopposed. Manually
+  rotating a held item still takes priority, exactly like the game's gun code
+- Completed the full study of the original NetworkingReworked (credit: readthisifbad):
+  every technique catalogued in docs/NETWORKINGREWORKED-NOTES.md with adoption status
+
+# 1.1.2
+
+Three fixes powered by studying the original NetworkingReworked's code (credit:
+readthisifbad — techniques adopted with thanks):
+
+- Thrown objects no longer stop mid-air when the throw grace ends: on release, the cached
+  host state is overwritten with our own release state (NetworkingReworked's trick), so
+  corrections never reference the host's stale "still in your hand" data
+- Opening doors/cabinets is no longer delayed: a door in local motion now belongs entirely
+  to local physics (NetworkingReworked's door model) — continuous rotation sync was
+  fighting the locally-running hinge logic. The host is followed only when *its* door moves
+  while yours rests (another player using it), plus a gentle long-idle reconcile
+- Held tools' residual jitter fixed: the rotation mirror now steers angular velocity
+  instead of forcing the transform each tick, so it cooperates with the grab physics
+  instead of fighting it
+
+# 1.1.1
+
+- Fixed held weapons vibrating violently (1.1.0 regression): running the game's weapon
+  orientation code locally fights the client-side grab physics. Weapons now mirror the
+  host's straightened rotation instead, like every other gadget — straight in hand, no fight
+- Fixed thrown objects "moving weirdly": right after a throw the host still thinks the
+  object is in your hand, and corrections dragged the flight toward that stale data.
+  Throws now fly on pure local physics for the grace period (config: PostThrowGrace),
+  then reconcile smoothly
+
+# 1.1.0 — first stable release
+
+- Held weapons now straighten out in your hand like they do for the host: guns and melee
+  weapons run the game's own orientation logic locally (instant), and every other gadget
+  mirrors the host's straightened rotation while held
+- Objects that drifted from the host's state no longer jiggle their way back or trail far
+  behind: position forcing is gone entirely for physics objects, replaced by
+  distance-scaled velocity steering that closes big gaps in under half a second — smoothly
+- Out of the experimental phase: warnings retired, VerboseLogging defaults to off
+  (turn it on and attach LogOutput.log when reporting bugs)
+
+# 1.0.7
+
+- Shop items (weapons, swords, grenades, energy crystals, tools...) are now simulated
+  locally like valuables and carts: they follow your hand instantly instead of being
+  host-driven with interpolation delay stacked on top ("tools feel laggy"). Thrown
+  items fly with your predicted throw too. Their effects — damage, explosions, battery
+  drain, breaking — remain host-decided exactly like vanilla.
+  Config: Simulation > SimulateItems
+
+# 1.0.6
+
+- Fixed world-wide vibration/jitter ("phone on max"): sync corrections were forcing object
+  positions every physics tick, fighting the physics engine 50x a second while chasing a
+  target that resets with every network packet. Corrections now steer velocity instead —
+  objects glide to the host's state and rigidbody interpolation stays smooth. Position
+  forcing only remains for large divergences (guaranteed convergence) and host-kinematic
+  objects
+- Held-object drift corrections are now smooth velocity nudges too (no position stepping)
+- Objects that are already in sync get a small deadband: no more micro-shimmer from
+  chasing per-packet noise while at rest
+- The network lag estimate is clamped so Photon clock noise can't kick host positions around
+- Note: if you tuned SmoothSync RateSmoothing up, set it back to 0.1 — at 1.0 the update-rate
+  estimate follows every packet-timing wobble and makes enemies/players jitter
+
+# 1.0.5
+
+- Pushing doors open with a cart (or your body, or held loot) no longer fights the sync:
+  while you're physically pushing a door, it goes fully local so it swings immediately,
+  then settles back to the host's state after — no more delayed/buggy door shoving
+- Held objects no longer trust stale velocity data when the host pauses sending
+  (a subtle source of weird cart corrections)
+- When the host stops sending entirely (game hang, host quitting, connection loss), the sync
+  no longer pins everything to the host's frozen last-known state — carts, doors and loot
+  stay fully usable locally until data flows again (the "everything was stuck" freeze)
+
+# 1.0.4
+
+- Interim re-release published directly on Thunderstore: same code as 1.0.3, packaging tweaks only
+
+# 1.0.3
+
+- Fixed choppy shadowed objects: Photon only sends packets when something changes, and the
+  blend treated stale data as live — objects vibrated/drifted around old targets. Silence now
+  correctly means "the host's copy is at rest exactly there", and while packets flow the blend
+  leads the target by the data's age for continuous motion. Blends also use interpolation-aware
+  physics moves instead of raw position writes (no more visible stepping)
+- Fixed cart desync when dragging from the body ("weak" mode): the local steering drive now
+  engages only for handle grabs, matching what the host actually simulates
+- Doors and cabinets are simulated locally again — done right this time (the way the original
+  NetworkingReworked did it): the game's own hinge logic (closing torque, latching, bounce,
+  stabilization) runs on your machine, the local joint is kept and unbreakable, host decides
+  breaks and we mirror them. Doors respond instantly (config: SimulateHinges)
+
+# 1.0.2
+
+- CRITICAL: fixed the "no internet" bug (couldn't host or join, no error shown) that came back
+  in 1.0.0/1.0.1. The new host-state capture hooked a PhotonNetwork method during mod loading,
+  which force-starts Photon too early and silently kills all connectivity. The hook is now
+  applied only after the game starts Photon itself. **Update from 1.0.1 immediately.**
+- CRITICAL: discovered that the sync system's update loops (passive blending, drift
+  correction, cart steering assist, handbacks — the entire anti-desync machinery) never
+  actually ran in ANY previous version: this game never runs Update on mod-created objects.
+  The loops now ride verified in-game hooks. This is very likely the root cause of most
+  desync reported so far — this version is effectively the architecture's first real run.
+
+# 1.0.1
+
+- Marked the mod clearly as experimental/testing-phase in all package files
+- VerboseLogging is now ON by default and records everything the sync system does:
+  object registrations, client-mode transitions, grabs/releases/throws, snaps (with reason
+  and distance), handbacks, dedupes, stale-host-data warnings, and 10-second stats
+  (registered objects, held objects, host packet flow)
+
+# 1.0.0
+
+- Merged NetworkingRevived and NetworkTweaksRevived into one mod
+- Host state is now captured at the raw network-event level (the original NetworkingReworked's
+  proven technique) — immune to component order, other mods' patches, and the silent capture
+  failures that left carts without host data
+- Fixed held objects being skipped by drift correction when the game force-flags them
+  "kinematic" for clients
+- Doors and cabinets reverted to host-driven (with smoothing): their springs, joints and
+  breaking are host-managed game logic that cannot be replicated locally without the
+  springy/broken-door bugs — this matches what the original NetworkingReworked did
+- Guaranteed cart steering, cargo riding, stuck-object snapping, velocity-aware drift
+  correction, post-throw grace, timeout fix, LateUpdate dispatch and SmoothSync all carried
+  over from the previous mods
+- VerboseLogging now prints per-second held-object diagnostics (speed, drift, host packet age)

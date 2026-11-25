@@ -1,0 +1,25 @@
+﻿
+Microsoft Visual Studio Solution File, Format Version 12.00
+# Visual Studio Version 17
+VisualStudioVersion = 17.10.35122.118
+MinimumVisualStudioVersion = 10.0.40219.1
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "RL-Mod", "RL-Mod.csproj", "{08FC2021-F9D8-476E-B0FB-817D6D054ADA}"
+EndProject
+Global
+	GlobalSection(SolutionConfigurationPlatforms) = preSolution
+		Debug|Any CPU = Debug|Any CPU
+		Release|Any CPU = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(ProjectConfigurationPlatforms) = postSolution
+		{08FC2021-F9D8-476E-B0FB-817D6D054ADA}.Debug|Any CPU.ActiveCfg = Debug|Any CPU
+		{08FC2021-F9D8-476E-B0FB-817D6D054ADA}.Debug|Any CPU.Build.0 = Debug|Any CPU
+		{08FC2021-F9D8-476E-B0FB-817D6D054ADA}.Release|Any CPU.ActiveCfg = Release|Any CPU
+		{08FC2021-F9D8-476E-B0FB-817D6D054ADA}.Release|Any CPU.Build.0 = Release|Any CPU
+	EndGlobalSection
+	GlobalSection(SolutionProperties) = preSolution
+		HideSolutionNode = FALSE
+	EndGlobalSection
+	GlobalSection(ExtensibilityGlobals) = postSolution
+		SolutionGuid = {CE8E668B-9274-4C14-8136-317978BE9B87}
+	EndGlobalSection
+EndGlobal

@@ -45,6 +45,70 @@ namespace RL2Multiplayer
         EnemyDamage = 33,       // 双向：协作共享血量——敌人受玩家攻击的伤害(key, dmg)，ReliableOrdered
         EnemyDied = 34,         // 双向：协作共享血量——敌人死亡(key)，ReliableOrdered
         EnemyStateSnapshot = 35,// 主机 -> 客机：协作共享血量——全量状态快照(敌人 key->hpPct + 死亡 key)，Sequenced
+        DashFx = 36,            // 双向：冲刺/虚冲特效事件(ownerId + isVoid)，ReliableOrdered——补 Trigger 与限时特效豁免
+        Chat = 37,              // 双向：文字聊天(int playerId + string text)，主机中转广播，ReliableOrdered
+        PlayerKicked = 38,      // 主机 -> 客机：你被踢了(string reason)，客机收到后自行 Stop，ReliableOrdered
+        // v2.0.0：协作"同世界"三件套
+        EnemyPosition = 39,     // 主机 -> 客机：怪物权威快照(count + [key,type,x,y,z,facing,target,animHash,animTime])，Sequenced 15Hz
+        RoomTravel = 40,        // 双向：全员换房——过门者 -> 主机 -> 其他端(room坐标 + 目标门 side/number)，ReliableOrdered
+        SceneChange = 41,       // 主机 -> 客机：场景切换(SceneID int + TransitionID int)，客机跟随，ReliableOrdered
+        BossProgress = 42,      // v2.0.1：主机 -> 客机：Boss 击败权威位图(ushort)，客机内存对齐门状态，ReliableOrdered
+        SkillTree = 43,         // v2.0.2：协作技能树共享——任一方加点(type+level 增量 / 全量表)，取 max 并集写各自存档，ReliableOrdered
+        PlayerHurt = 44,        // v2.1.0：分身受击转发——被击中的分身 -> 主机 -> 真身持有者(targetId,dmg,stun,srcX,srcY)，ReliableOrdered
+        // v2.4.1：死亡/结束本局一致性
+        PlayerDown = 45,        // 双向：倒地状态心跳(id + downed)，0.3s 一发，ReliableOrdered。
+                                // 与位置包解耦：GoDown 会把角色 SetActive(false)，旧版 downed 标志
+                                // 挂在位置包里，一旦发包路径被"本地玩家引用"检查挡掉就永久丢状态
+                                // （实测客机死亡后主机一直显示 alive=1/1，两端对"全灭"判断分叉）。
+        RunOver = 46,           // 双向：本局结束（全员倒下）。任一端判定后广播，另一端收到直接
+                                // 放行真实死亡，避免"一端卡在观战、另一端还在打"的死局。
+        // v2.5.0：统一时钟轴（借鉴 rl2-coop 的 NTP 式 ClockSync）
+        TimePing = 47,          // 客机 -> 主机：时钟探测(double 本地单调时刻)，非可靠
+        TimePong = 48,          // 主机 -> 客机：回显 clientTime + 主机时刻(double)，非可靠
+        EnemyAlive = 49,        // 主机 -> 客机：房间怪物存活权威位/键集（低频可靠），解决活怪数不一致
+        ObstaclePose = 50,      // 主机 -> 客机：移动障碍物权威位置(15Hz Sequenced，带主机时间戳)
+        // v2.7.0：视觉弹提前消失（火墙/持续法术停止时 FlagForDestruction/SetActive(false)）
+        // 之前只同步了发射，对端那颗弹会停在最后一帧永不消失。
+        ProjectileDespawn = 51, // 双向：ownerId + uint spawnId，ReliableOrdered（与发射同通道保序）
+        // v2.8.6：联机显示名，独立消息，不改任何现有包格式（协议仍 3000）
+        PlayerName = 52,        // 双向：senderId + 名字；主机收到后中转给其他客机
+        // v2.9.0：旋转型机关(Windmill/Orbiter 等)的权威角度。主机端 culling 远离时
+        // pivot 被禁用、角度冻结；客机本地仍转 → 两端发散。主机 15Hz 广播角度，
+        // 客机在 LateUpdate 覆盖自己的 localEulerAngles.z。
+        ObstacleRotation = 53,
+        // v3.0.2：施法动画事件重放（HKMP 式）。只发"进入施法状态"事件，
+        // 接收端从 0 重放一次动画+粒子，替代逐层 normalizedTime 硬追造成的抽搐。
+        AbilityFx = 54,
+        // v3.0.5：动画特效主动事件。本地玩家 EffectTriggerAnimBehaviour 触发特效时，
+        // 把 EffectTriggerEntry 关键字段广播；接收端直接调用原生 EffectTrigger.InvokeTrigger
+        // 在分身上生成特效，绕开禁用列表 / 参数条件 / Trigger 不可传的老问题。
+        SpellFx = 55,
+        // v3.0.6：投射物姿态。火环(FlameBarrier)等持续法术把多颗弹挂在 carousel 下由 C# 每帧
+        // 旋转，只在发射瞬间发一次快照远端会定格第一帧。权威端 15Hz 广播活跃弹的世界位姿，
+        // 远端按 (ownerId, spawnId) 覆盖视觉弹 transform，让火环绕圈/旋踢弹持续运动。
+        ProjectilePose = 56,
+        // v3.0.7：换房到位回执（借鉴 Boss Room LoadEventCompleted 门闩）。
+        // 跟随端 ApplyNow 走到终态后回执"已到位/未到位"，发起端收齐在线对端才关闸；
+        // 未到位的回执触发一次权威包补发，让跟随端重新进入重试窗口。
+        RoomTravelAck = 57,
+        // v3.0.9：施法特效取消事件（借鉴 Boss Room AnimatorTriggeredSpecialFX 的
+        // OnStateExit -> Shutdown）。本地真身施法动画节点退出时广播，接收端停掉
+        // 分身上由该 Owner 触发的同名特效，消除"法术播完残留/循环特效不停"。
+        SpellFxStop = 58,
+        // v3.0.17：代码直调 EffectManager.PlayEffect 的特效事件。动画桥只覆盖
+        // EffectTriggerAnimBehaviour；CannonBallMuzzle/CloakPuff/LanceChargingUp 等
+        // 由技能代码直接 PlayEffect 的视觉从来没同步过。接收端在分身上重放。
+        CodeFx = 59,
+        // v3.0.23：一次性世界状态共享（掉物易碎品 / 治疗树等特殊房），
+        // 两端看到同一份"已破/已用完"状态。ReliableOrdered，单调幂等。
+        WorldState = 60,
+        // v3.0.25：开局流程同步（交钱给 Charon + 锁城堡/世界锁 + 那套动画）。
+        // 主机点"进城堡"时，客机必须做同样的事，否则客机金币没归零、锁状态不一致、
+        // "世界锁"动画与音效两端对不上。ReliableOrdered。
+        RunStart = 61,
+        // v3.0.26：漂流屋挑战的【会合门闩】—— 两端都选好同一个挑战才一起进。
+        // ReliableOrdered。
+        Challenge = 62,
     }
 
     public class NetworkManager : MonoBehaviour, INetEventListener
@@ -55,6 +119,37 @@ namespace RL2Multiplayer
         private const string Key = "RL2MP";
         private const float SendInterval = 0.05f;
         private const int HostId = 0;
+
+        /// <summary>
+        /// 协议版本（v2.1.0 = 2100）。任何包格式改动都必须 +1。
+        ///
+        /// 为什么必须校验：换房包在 2.1.0 里加了 seq 字段，如果一端还是旧版，
+        /// 旧版按旧格式读就会把 float 的字节读串，坐标变成 2.38E-41 这种垃圾值，
+        /// 表现是"人物位置严重不匹配 + 传送没反应"，极难从现象反推原因。
+        /// 这里在握手时就比对，不一致直接拒绝并说明原因。
+        /// </summary>
+        // v2.9.1：RoomTravel 包新增房间 transform 锚点。
+        // v3.0.0：世界驱动权改为可移交令牌——旧版客机不会应用"客机权威"的快照。
+        // v3.0.1：障碍 key 去掉房间坐标段（改为障碍自身稳定身份）+ RoomTravel 稳定解析，
+        // 旧版 key 算法不同会 match 不上，必须两端同步升级。
+        // v3.0.2：新增 AbilityFx 施法事件重放通道，两端需同版本才不会出现"一端重放一端硬追"。
+        // v3.0.5：新增 SpellFx 特效主动事件通道（EffectTriggerEntry 线格式），两端必须同版本。
+        // v3.0.6：新增 ProjectilePose 投射物姿态广播（fire barrier 等 carousel 弹需要），两端同版本。
+        // v3.0.7：新增 RoomTravelAck 到位回执（换房门闩），两端同版本。
+        // v3.0.9：新增 SpellFxStop 特效取消事件（动画节点退出停对端特效），两端同版本。
+        // v3.0.17：新增 CodeFx（代码直调 PlayEffect 特效），两端同版本。
+        // v3.0.22：RoomTravel 追加 biome 字段（跨区域时对端本地要补建房间）。
+        // v3.0.23：新增 WorldState 一次性世界状态共享通道，两端必须同版本。
+        // v3.0.24：协议号上调（行为层改动较大，且必须两端同版本，避免半新半旧混跑）。
+        // v3.0.25：新增 RunStart（开局交钱 + 世界锁同步）通道；两端必须同版本。
+        // v3.0.26：新增 Challenge（漂流屋挑战会合门闩）通道；两端必须同版本。
+        internal const int ProtocolVersion = 3015;
+
+        private static string FmtProto(int p)
+        {
+            if (p <= 0) return "未知";
+            return (p / 1000) + "." + (p / 100 % 10) + "." + (p % 100);
+        }
 
         public bool IsHost { get; private set; }
         public bool Connected { get { return _netManager != null && _netManager.IsRunning; } }
@@ -69,6 +164,12 @@ namespace RL2Multiplayer
 
         public event Action<int> OnPlayerJoin;
         public event Action<int> OnPlayerLeave;
+
+        /// <summary>v2.5.0 协议校验：仅供 NetValidation 反查连接绑定的玩家 ID（反冒充）。</summary>
+        internal bool TryGetBoundPlayerId(int netPeerId, out int playerId)
+        {
+            return _peerToPlayerId.TryGetValue(netPeerId, out playerId);
+        }
 
         /// <summary>HOST：已连接的客机 ID 列表（竞速仲裁用）。</summary>
         public IEnumerable<int> ClientIds { get { return _clients.Keys; } }
@@ -99,6 +200,10 @@ namespace RL2Multiplayer
         private float _rateLimitTimer;
         private int _sendCountSinceLastLog;
         private int _recvCountSinceLastLog;
+        // v2.5.2：relay 日志专用节流——原来共用 _rateLimitTimer（每 2s 清零），
+        // 导致 20Hz PlayerState 每条都刷一行，真机磁盘 I/O 拖慢帧率（主机日志刷了 93 条）。
+        private int _relayCountSinceLastLog;
+
         private float _lastPosX = float.NaN;
         private float _lastPosY = float.NaN;
 
@@ -111,7 +216,7 @@ namespace RL2Multiplayer
 
         private static readonly System.Random _rng = new System.Random();
 
-        private class GhostSlot { public int PlayerId; public int Token; public float At; }
+        private class GhostSlot { public int PlayerId; public int Token; public float At; public string Ip; }
         private class PendingPeer { public NetPeer Peer; public float At; }
 
         private readonly Dictionary<int, GhostSlot> _ghosts = new Dictionary<int, GhostSlot>();
@@ -137,6 +242,15 @@ namespace RL2Multiplayer
         private float _downResendTimer;
         private const float DownResendInterval = 0.5f;
 
+        // v2.4.1：倒地状态独立心跳。上一版依赖位置包里顺带发的 PlayerFlags，
+        // 而位置包的前置条件里有 PlayerSync.LocalPlayer != null —— 死亡瞬间角色被
+        // SetActive(false)，加上 TriggerRealDeath 失败的连锁，状态就再也没送到对端。
+        // 这里彻底解耦：只要拿到了 playerId，就每 0.3s 发一条 4 字节的 PlayerDown。
+        private float _downBeatTimer;
+        private const float DownBeatInterval = 0.3f;
+        private bool _lastDownBeat;   // 仅用于日志去重
+        private bool _lastRunOverSent;
+
         public bool IsReconnecting { get { return _reconnecting; } }
         public int ReconnectAttempt { get { return _reconnectAttempt; } }
         public float ReconnectElapsed { get { return _reconnectElapsed; } }
@@ -153,6 +267,25 @@ namespace RL2Multiplayer
         }
 
         /// <summary>
+        /// v2.0.0：怪物权威位置在 AI 的 Update 之后覆盖，避免被 AI 下一帧算出的位置打架。
+        /// LateUpdate 在所有 Update 完成后执行，正好适合做视觉/碰撞位置对齐。
+        /// </summary>
+        private void LateUpdate()
+        {
+            // v3.0.6：本地弹体姿态广播（火环 carousel 30Hz），放在所有游戏逻辑之后采样
+            ProjectileSync.TickPose();
+            if (EnemyPositionSync.Active) EnemyPositionSync.ClientApplyLate();
+            if (EnemyAliveSync.Active) EnemyAliveSync.ClientTick(); // v2.5.0：按权威存活集补杀
+            ObstacleSync.ClientApplyLate();  // v2.5.0：权威障碍物位置覆盖（与 AI/Update 对抗）
+            RoomTravelSync.Tick();   // v2.0.4：远端换房延后到 LateUpdate 应用（避免收包回调里改场景重入卡死）
+            PlayerHurtSync.Tick();   // v2.1.0：血量变化兜底监控（Harmony 补丁失效时仍能去重）
+            EnemyAiFix.Tick();       // v2.2.1：怪物目标指向已销毁玩家时自动修复（对象池复用）
+            SceneChangeSync.Tick();  // v2.3.2：场景加载看门狗（请求了但卡住时自动重试一次）
+            RunStartSync.Tick();     // v3.0.25：轮询锁城堡（世界锁）状态，变了就广播给对端
+            ChallengeSync.Tick();    // v3.0.26：挑战会合门闩（等队友到齐再一起进）
+        }
+
+        /// <summary>
         /// 网络收发泵。v1.8.0：除了 MonoBehaviour.Update，还由 Bootstrap.Tick(onBeforeRender)
         /// 驱动一次——游戏暂停(Time.timeScale=0)时若不保险，可能漏收发。用 frameCount 守卫
         /// 保证同一帧只泵一次，不重复发包/重入。
@@ -163,6 +296,8 @@ namespace RL2Multiplayer
             if (_lastPumpFrame == Time.frameCount) return;
             _lastPumpFrame = Time.frameCount;
 
+            PauseCompat.Tick(Time.unscaledDeltaTime);
+
             _rateLimitTimer += Time.unscaledDeltaTime;
             if (_rateLimitTimer >= 2f)
             {
@@ -171,11 +306,13 @@ namespace RL2Multiplayer
                 {
                     Plugin.Log.LogInfo("[RL2MP] [STATS] last 2s -> sent=" + _sendCountSinceLastLog
                         + " recv=" + _recvCountSinceLastLog
+                        + " relayed=" + _relayCountSinceLastLog
                         + " knownPlayers=" + _knownPlayerIds.Count
                         + " localId=" + LocalPlayerId);
                 }
                 _sendCountSinceLastLog = 0;
                 _recvCountSinceLastLog = 0;
+                _relayCountSinceLastLog = 0;
             }
 
             if (_debugSimActive)
@@ -206,16 +343,34 @@ namespace RL2Multiplayer
                 }
             }
 
+            // v3.0.0：世界驱动权从"写死主机"改为可移交令牌（详见 RoomAuthority）。
+            // 纯主机事务（连接清理/握手/地图/技能树存档）仍绑定 IsHost；
+            // 世界状态（怪物/障碍/Boss/存活集）改由当前权威方驱动——主机倒地时客机接管。
+            RoomAuthority.Tick();
             if (IsHost)
             {
                 GhostSweep();
                 TickPendingHellos();
                 MapSync.HostTick();
-                EnemySync.HostTick();   // v1.8.0：协作共享血量状态快照（权威对账）
+                SkillTreeSync.HostTick();     // v2.0.2：协作技能树全量兜底（中途加入/漏包补齐）
             }
-            else
+
+            // 世界状态驱动：谁持有令牌谁采样广播，不再写死主机。
+            if (RoomAuthority.ShouldDriveWorld)
+            {
+                EnemySync.HostTick();   // v1.8.0：协作共享血量状态快照（权威对账）
+                EnemyAliveSync.HostTick();    // v2.5.0：协作怪物存活权威集（1Hz）
+                ObstacleSync.HostTick();      // v2.5.0：移动障碍物权威位置（15Hz）
+                EnemyPositionSync.HostTick(); // v2.0.0：协作怪物权威位置（20Hz）
+                BossProgressSync.HostTick();  // v2.0.1：Boss 击败权威位图（权威说了算）
+            }
+
+            if (!IsHost)
             {
                 MapSync.ClientTick();
+                // v2.5.0：统一时钟轴——客机周期性发 TimePing 估计主机 offset。
+                double ct;
+                if (SessionActive && NetClock.ShouldPing(out ct)) SendTimePing(ct);
             }
 
             // 角色外观：本地角色变了（换继承人/换装备）就补发
@@ -223,6 +378,17 @@ namespace RL2Multiplayer
 
             // 分层发包（v1.6.0）：位置 20Hz（Sequenced）+ 动画 10Hz（Sequenced）
             // + downed 变化时才发的 Reliable 标志包，带宽比原先一体的 20Hz 大包省一半以上
+            // v2.4.1：倒地心跳独立于位置包，不受 LocalPlayer 引用影响
+            if (LocalPlayerId >= 0)
+            {
+                _downBeatTimer += Time.unscaledDeltaTime;
+                if (_downBeatTimer >= DownBeatInterval)
+                {
+                    _downBeatTimer = 0f;
+                    SendPlayerDownBeat(DownedState.LocalDown);
+                }
+            }
+
             if (LocalPlayerId >= 0 && PlayerSync.Instance != null && PlayerSync.Instance.LocalPlayer != null)
             {
                 _transformSendTimer += Time.unscaledDeltaTime;
@@ -384,7 +550,11 @@ namespace RL2Multiplayer
             _ghosts.Clear();
             _pendingPeers.Clear();
             _manualStop = false;
+            RoomAuthority.Reset();   // v3.0.0：新会话重新判定世界驱动权
             SessionActive = true;
+            // v2.8.8：StartHost 之前没有复位 _lastRunOverSent —— 同一进程里"停服再开服"时
+            // 一次性标志残留，第二局起全灭不再广播 RunOver，客机停在观战不回城。
+            ResetRunOverFlag();
             Roster.SyncSelf();
 
             Plugin.Log.LogInfo("[RL2MP] [START HOST] SUCCESS! IsHost=true, LocalPlayerId=" + LocalPlayerId
@@ -452,6 +622,8 @@ namespace RL2Multiplayer
             _resumeId = -1;      // 新会话：不带旧身份
             _sessionToken = 0;
             _lastSentDowned = false;
+            NetClock.Reset();
+            ResetRunOverFlag();
 
             Plugin.Log.LogInfo("[RL2MP] [START CLIENT] Connect request sent to " + target + ":" + Port + ". Waiting for Welcome...");
         }
@@ -506,11 +678,18 @@ namespace RL2Multiplayer
 
             IsHost = false;
             LocalPlayerId = -1;
+            RoomAuthority.Reset();   // v3.0.0：会话结束清空令牌状态
 
             // 会话结束：客机恢复自己的周期/累赘内存值
             RaceRulesSync.Restore("network stopped");
             // 客机恢复自己的地图数据（防存档污染）
             MapSync.Restore("network stopped");
+            // v2.0.1：客机恢复自己的 Boss 门进度（内存），不污染源存档
+            BossProgressSync.Restore("network stopped");
+            BossProgressSync.ResetHost();
+            SkillTreeSync.Reset();  // v2.0.2：只清标志；技能树是永久共享元进度，不断线还原
+            RoomTravelSync.Reset("network stopped");  // v2.0.4：清待应用换房 + 回声窗口
+            PlayerHurtSync.Reset("network stopped");  // v2.1.0：清受击去重时间戳
             CharacterSync.Clear("network stopped");
 
             // 防御：如果游戏输入映射（Game 层）被某个流程留在了禁用状态，
@@ -719,6 +898,59 @@ namespace RL2Multiplayer
         }
 
         /// <summary>
+        /// v2.4.1：倒地状态心跳（0.3s）。不依赖位置包与本地角色引用，
+        /// 保证"我死了"这件事一定能送达对端，两端对全灭的判断不会分叉。
+        /// </summary>
+        private void SendPlayerDownBeat(bool downed)
+        {
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.PlayerDown);
+            w.Put(LocalPlayerId);
+            w.Put(downed);
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+
+            if (downed != _lastDownBeat)
+            {
+                _lastDownBeat = downed;
+                Plugin.Log.LogInfo("[RL2MP] [DOWN] 本端倒地状态切换 -> " + downed
+                    + "（已广播 PlayerDown 心跳 id=" + LocalPlayerId + "）");
+            }
+        }
+
+        /// <summary>v2.4.1：状态翻转时立即补发一条（0.3s 心跳之外的即时同步）。</summary>
+        internal void SendDownedNow(bool downed)
+        {
+            if (LocalPlayerId < 0) return;
+            _downBeatTimer = 0f;
+            SendPlayerDownBeat(downed);
+        }
+
+        /// <summary>
+        /// v2.4.1：广播"本局结束"。任一端判定全员倒下后调用：
+        /// 主机 -> 所有客机；客机 -> 主机（主机再转发给其他客机）。
+        /// </summary>
+        internal void SendRunOver(string reason)
+        {
+            if (_lastRunOverSent) return;
+            _lastRunOverSent = true;
+
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.RunOver);
+            w.Put(LocalPlayerId);
+            w.Put(reason ?? "");
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+            Plugin.Log.LogInfo("[RL2MP] [RUNOVER] 已广播本局结束 -> 所有对端（" + reason + "）");
+        }
+
+        /// <summary>新对局/重连时复位只发一次的标志。</summary>
+        internal void ResetRunOverFlag()
+        {
+            _lastRunOverSent = false;
+            _lastDownBeat = false;
+            _downBeatTimer = 0f;
+        }
+
+        /// <summary>
         /// 协作救援：救人者长按 H 完成后调用。带上被救者 playerId，发给主机；
         /// 主机收到后按 targetId 定向转交给被救者本人（见 OnNetworkReceive 的 CoOpRescue 分支）。
         /// </summary>
@@ -738,10 +970,141 @@ namespace RL2Multiplayer
             SendToPeers(w, DeliveryMethod.ReliableOrdered);
         }
 
-        /// <summary>v1.8.0：主机广播敌人血量全量快照（Sequenced——新快照覆盖旧的，暂停/丢包后用最新一帧对账）。</summary>
+        /// <summary>v1.8.0：权威广播敌人血量全量快照（Sequenced——新快照覆盖旧的，暂停/丢包后用最新一帧对账）。
+        /// v3.0.0：主机倒地时令牌交给客机，这里按令牌判断而非写死 IsHost。</summary>
         internal void SendEnemySnapshot(NetDataWriter w)
         {
-            if (IsHost) SendToPeers(w, DeliveryMethod.Sequenced);
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.Sequenced);
+        }
+
+        /// <summary>v2.0.0：全员换房——过门者广播房间坐标+门信息，主机中转给其他端跟随。</summary>
+        internal void SendRoomTravel(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.7：换房到位回执——ReliableOrdered，必须送到发起端关闸。</summary>
+        internal void SendRoomTravelAck(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v2.0.0：全员场景切换广播（任一端触发，主机中转给其他端）。</summary>
+        internal void SendSceneChange(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v2.0.0：权威广播怪物位置快照（Sequenced，20Hz）。v3.0.0：按令牌判定。</summary>
+        internal void SendEnemyPosition(NetDataWriter w)
+        {
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.Sequenced);
+        }
+
+        /// <summary>v2.5.0：权威广播移动障碍物位置（Sequenced，15Hz）。v3.0.0：按令牌判定。</summary>
+        internal void SendObstaclePose(NetDataWriter w)
+        {
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.Sequenced);
+        }
+
+        /// <summary>v2.9.0：权威广播旋转型机关角度（Sequenced，15Hz）。v3.0.0：按令牌判定。</summary>
+        internal void SendObstacleRotation(NetDataWriter w)
+        {
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.Sequenced);
+        }
+
+        /// <summary>v2.5.0：权威广播房间怪物存活集（ReliableOrdered）。v3.0.0：按令牌判定。</summary>
+        internal void SendEnemyAlive(NetDataWriter w)
+        {
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>客机发时钟探测（非可靠）；主机回 pong（非可靠）。</summary>
+        internal void SendTimePing(double clientTime)
+        {
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.TimePing);
+            w.Put(clientTime);
+            if (_serverPeer != null && _serverPeer.ConnectionState == ConnectionState.Connected)
+                _serverPeer.Send(w, DeliveryMethod.Unreliable);
+        }
+
+        private void ReplyTimePong(NetPeer peer, double clientTime)
+        {
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.TimePong);
+            w.Put(clientTime);            // echo, so guest computes rtt
+            w.Put(NetClock.HostNow);      // host authority timestamp
+            peer.Send(w, DeliveryMethod.Unreliable);
+        }
+
+        /// <summary>v2.0.1：权威广播 Boss 击败位图（ReliableOrdered）。v3.0.0：按令牌判定。</summary>
+        internal void SendBossProgress(NetDataWriter w)
+        {
+            if (RoomAuthority.IsLocalAuthority) SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v2.1.0：分身被击中——把伤害转发给分身背后的真身（主机中转）。</summary>
+        internal void SendPlayerHurt(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v1.8.4：冲刺/虚冲特效事件——ReliableOrdered，保证对端一定收到并补放残影。</summary>
+        internal void SendDashFx(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.2：施法动画事件重放——ReliableOrdered，保证一次性施法事件不丢。</summary>
+        internal void SendAbilityFx(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.5：动画特效主动事件——ReliableOrdered，保证施法粒子不丢。</summary>
+        internal void SendSpellFx(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.9：特效取消事件——ReliableOrdered，与 SpellFx 同通道保证"播放/停止"有序。</summary>
+        internal void SendSpellFxStop(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.17：代码直调 PlayEffect 的特效事件——与 SpellFx 同通道保证播放顺序。</summary>
+        internal void SendCodeFx(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.23：一次性世界状态（易碎品/特殊房）——ReliableOrdered，保证不丢。</summary>
+        internal void SendWorldState(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.25：开局流程同步（交钱 + 世界锁）。ReliableOrdered，不能丢。</summary>
+        internal void SendRunStart(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>v3.0.26：挑战会合门闩。ReliableOrdered，不能丢。</summary>
+        internal void SendChallenge(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>
+        /// v3.0.6：投射物姿态（30Hz，Sequenced 旧的丢弃）。火环等 carousel 弹靠它持续转。
+        /// 用 SendToPeers 走主机广播/客机上行，主机收包后转给其他端（见收包分支）。
+        /// </summary>
+        internal void SendProjectilePose(NetDataWriter w)
+        {
+            SendToPeers(w, DeliveryMethod.Sequenced);
         }
 
         /// <summary>HOST：等待 Hello 超时的兜底——旧版本客户端不会发 Hello，按新玩家注册。</summary>
@@ -855,7 +1218,10 @@ namespace RL2Multiplayer
             }
 
             Plugin.Log.LogInfo("[RL2MP] [SEED] 正在重进 World（FadeToBlackWithLoading 转场）...");
-            SceneLoader_RL.LoadScene(SceneID.World, TransitionID.FadeToBlackWithLoading);
+            // v2.0.2：这是程序内部为对齐种子发起的重进，不能广播出去，否则两端场景回声无限加载
+            SceneChangeSync.SuppressBroadcast = true;
+            try { SceneLoader_RL.LoadScene(SceneID.World, TransitionID.FadeToBlackWithLoading); }
+            finally { SceneChangeSync.SuppressBroadcast = false; }
         }
 
         private void BroadcastLevelSeed(int seed)
@@ -1112,7 +1478,135 @@ namespace RL2Multiplayer
             return true;
         }
 
-        /// <summary>弹体发射事件：每个弹都是离散事件，用 ReliableUnordered（丢了重传但不排队，乱序无所谓）。</summary>
+        // ---------------- v1.9.4：聊天 + 房主踢人 ----------------
+
+        /// <summary>
+        /// v2.8.6：广播本机的自定义显示名。客机发给主机（主机再中转），主机直接发全体。
+        /// 使用独立的 PlayerName 消息，不动 Hello/Welcome/Chat 格式，协议版本保持 3000。
+        /// </summary>
+        internal void SendPlayerName()
+        {
+            if (!Connected || LocalPlayerId < 0) return;
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.PlayerName);
+            w.Put(LocalPlayerId);
+            w.Put(Plugin.PlayerName);
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+            Plugin.Log.LogInfo("[RL2MP] [NET] -> PlayerName '" + Plugin.PlayerName + "'");
+        }
+
+        /// <summary>发送一条聊天文本。客机发给主机、主机中转广播；主机本地直接发全体。</summary>
+        internal void SendChat(string text)
+        {
+            if (string.IsNullOrEmpty(text) || !Connected) return;
+            var w = new NetDataWriter();
+            w.Put((byte)MsgType.Chat);
+            w.Put(LocalPlayerId);
+            w.Put(text);
+            SendToPeers(w, DeliveryMethod.ReliableOrdered);
+        }
+
+        /// <summary>HOST：把某客机踢出房间。通知对方（让它走完整 Stop），并立即清掉本端槽位/ghost。</summary>
+        internal bool KickPlayer(int playerId)
+        {
+            if (!IsHost || playerId == HostId) return false;
+
+            NetPeer peer = null;
+            _clients.TryGetValue(playerId, out peer);
+
+            // 先通知被踢者，让它自己走 Stop（给 Reliable 送达留出机会）
+            if (peer != null && peer.ConnectionState == ConnectionState.Connected)
+            {
+                try
+                {
+                    var w = new NetDataWriter();
+                    w.Put((byte)MsgType.PlayerKicked);
+                    w.Put("房主将你移出了房间");
+                    peer.Send(w, DeliveryMethod.ReliableOrdered);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("[RL2MP] [KICK] 通知被踢者失败: " + ex.Message);
+                }
+            }
+
+            // 本端清理：立即断开并移除槽位（不进 ghost 宽限期）
+            if (peer != null)
+            {
+                try { peer.Disconnect(); }
+                catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [KICK] disconnect 异常: " + ex.Message); }
+                int netId = peer.Id;
+                _peerToPlayerId.Remove(netId);
+            }
+            _clients.Remove(playerId);
+            _ghosts.Remove(playerId);
+            _pendingPeers.Clear();
+            _knownPlayerIds.Remove(playerId);
+            Roster.Remove(playerId);
+
+            var handler = OnPlayerLeave;
+            if (handler != null) handler(playerId);
+            Race.BroadcastLobby();
+
+            Plugin.Log.LogInfo("[RL2MP] [KICK] 房主踢出 playerId=" + playerId
+                + "，剩余客户端 " + _clients.Count + " 个。");
+            return true;
+        }
+
+        /// <summary>
+        /// HOST：拒绝协议版本不一致的客机。
+        /// 延迟断开是为了让 ReliableOrdered 的提示包先发出去——立刻 Disconnect 会连包带连接一起丢，
+        /// 客机只看到"莫名其妙断线"，然后无限自动重连。
+        /// </summary>
+        private void RejectIncompatible(NetPeer peer, int theirProto)
+        {
+            Plugin.Log.LogWarning("[RL2MP] [NET] 拒绝连接：mod 协议不一致（对方 " + FmtProto(theirProto)
+                + " / 本机 " + FmtProto(ProtocolVersion) + "）。");
+            try
+            {
+                if (peer != null && peer.ConnectionState == ConnectionState.Connected)
+                {
+                    var w = new NetDataWriter();
+                    w.Put((byte)MsgType.PlayerKicked);
+                    w.Put("mod 版本不一致（主机 " + FmtProto(ProtocolVersion) + " / 客机 " + FmtProto(theirProto)
+                          + "）。请把两端的 RL-Mod.dll 换成同一版本。");
+                    peer.Send(w, DeliveryMethod.ReliableOrdered);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [NET] 发送版本提示失败: " + ex.Message);
+            }
+
+            StartCoroutine(DisconnectPeerAfter(peer, 0.35f));
+        }
+
+        private System.Collections.IEnumerator DisconnectPeerAfter(NetPeer peer, float delay)
+        {
+            yield return new WaitForSecondsRealtime(delay);
+            try { if (peer != null) peer.Disconnect(); } catch { }
+        }
+
+        /// <summary>HOST：清理一个掉线 ghost 槽位（幽灵玩家也能手动移除）。</summary>
+        internal bool RemoveGhost(int playerId)
+        {
+            if (!IsHost || playerId == HostId) return false;
+            bool removed = _ghosts.Remove(playerId);
+            if (_clients.ContainsKey(playerId)) return false; // 还在线，不能用这个入口
+            _knownPlayerIds.Remove(playerId);
+            Roster.Remove(playerId);
+            var leaveHandler = OnPlayerLeave;
+            if (leaveHandler != null) leaveHandler(playerId);
+            Race.BroadcastLobby();
+            Plugin.Log.LogInfo("[RL2MP] [KICK] 房主清理幽灵槽位 playerId=" + playerId + " (hadGhost=" + removed + ")");
+            return removed;
+        }
+
+        /// <summary>
+        /// 弹体发射事件：v2.7.0 起与 despawn 一起走 ReliableOrdered。
+        /// 原来用 ReliableUnordered，despawn 可能早于 spawn 到达，对端会丢掉消失通知
+        /// （火墙残留最后一个火球就是这个原因之一）。
+        /// </summary>
         internal void SendProjectile(NetDataWriter w)
         {
             if (IsHost)
@@ -1120,12 +1614,29 @@ namespace RL2Multiplayer
                 foreach (var c in _clients.Values)
                 {
                     if (c != null && c.ConnectionState == ConnectionState.Connected)
-                        c.Send(w, DeliveryMethod.ReliableUnordered);
+                        c.Send(w, DeliveryMethod.ReliableOrdered);
                 }
             }
             else if (_serverPeer != null && _serverPeer.ConnectionState == ConnectionState.Connected)
             {
-                _serverPeer.Send(w, DeliveryMethod.ReliableUnordered);
+                _serverPeer.Send(w, DeliveryMethod.ReliableOrdered);
+            }
+        }
+
+        /// <summary>弹体提前消失：主机中转给其他端，必须可靠且与发射同通道保序。</summary>
+        internal void SendProjectileDespawn(NetDataWriter w)
+        {
+            if (IsHost)
+            {
+                foreach (var c in _clients.Values)
+                {
+                    if (c != null && c.ConnectionState == ConnectionState.Connected)
+                        c.Send(w, DeliveryMethod.ReliableOrdered);
+                }
+            }
+            else if (_serverPeer != null && _serverPeer.ConnectionState == ConnectionState.Connected)
+            {
+                _serverPeer.Send(w, DeliveryMethod.ReliableOrdered);
             }
         }
 
@@ -1147,6 +1658,22 @@ namespace RL2Multiplayer
                     c.Send(w, DeliveryMethod.ReliableOrdered);
                     sent++;
                 }
+            }
+        }
+
+        /// <summary>
+        /// HOST：高频姿态包（30Hz）中转——用 Sequenced，旧包直接丢弃不堆积。
+        /// 不能复用 ForwardToOtherClients（ReliableOrdered），否则丢一个包会卡住后续全部姿态。
+        /// </summary>
+        internal void ForwardPoseToOtherClients(int excludePlayerId, NetDataWriter w)
+        {
+            if (!IsHost || _clients.Count == 0) return;
+            foreach (var kv in _clients)
+            {
+                if (kv.Key == excludePlayerId) continue;
+                var c = kv.Value;
+                if (c != null && c.ConnectionState == ConnectionState.Connected)
+                    c.Send(w, DeliveryMethod.Sequenced);
             }
         }
 
@@ -1231,15 +1758,17 @@ namespace RL2Multiplayer
             }
         }
 
-        /// <summary>客机 -> 主机：握手包（playerId + token）。首次连接 playerId=-1。</summary>
+        /// <summary>客机 -> 主机：握手包（playerId + token + 协议版本）。首次连接 playerId=-1。</summary>
         private void SendHello()
         {
             var w = new NetDataWriter();
             w.Put((byte)MsgType.Hello);
             w.Put(_resumeId);
             w.Put(_sessionToken);
+            w.Put(ProtocolVersion);
             if (_serverPeer != null) _serverPeer.Send(w, DeliveryMethod.ReliableOrdered);
-            Plugin.Log.LogInfo("[RL2MP] [NET] -> Hello sent (resumeId=" + _resumeId + ", token=" + _sessionToken + ")");
+            Plugin.Log.LogInfo("[RL2MP] [NET] -> Hello sent (resumeId=" + _resumeId + ", token=" + _sessionToken
+                + ", proto=" + FmtProto(ProtocolVersion) + ")");
         }
 
         /// <summary>给客机分配一个新的游戏层玩家 ID（跳过已占用的）。</summary>
@@ -1266,7 +1795,9 @@ namespace RL2Multiplayer
             int useToken;
             bool resumed = false;
 
+            string peerIp = peer.Address != null ? peer.Address.ToString() : "";
             GhostSlot ghost;
+
             if (requestedId > 0 && token != 0
                 && _ghosts.TryGetValue(requestedId, out ghost)
                 && ghost.Token == token)
@@ -1278,6 +1809,18 @@ namespace RL2Multiplayer
                 _ghosts.Remove(requestedId);
                 Plugin.Log.LogInfo("[RL2MP] [NET] -> RESUMED session: playerId=" + assignedId
                     + " reconnected within grace period (slot restored).");
+            }
+            else if (!string.IsNullOrEmpty(peerIp) && FindGhostByIp(peerIp, out ghost))
+            {
+                // v1.9.4：token 失配/丢失（例如游戏卡死后强退、进程重启导致 token 没保住），
+                // 但同一 IP 在宽限期内有掉线槽位 -> 判定为同一台机器重连，恢复原槽位，
+                // 避免主机多出一个幽灵玩家（原本会分配新 id，旧 ghost 还挂在名单上）。
+                assignedId = ghost.PlayerId;
+                useToken = ghost.Token;
+                resumed = true;
+                _ghosts.Remove(ghost.PlayerId);
+                Plugin.Log.LogInfo("[RL2MP] [NET] -> RESUMED by IP match: playerId=" + assignedId
+                    + " ip=" + peerIp + " (token mismatch, restored slot to avoid ghost player).");
             }
             else
             {
@@ -1291,6 +1834,21 @@ namespace RL2Multiplayer
             }
 
             RegisterPeer(peer, assignedId, useToken, resumed);
+        }
+
+        /// <summary>HOST：按 IP 找宽限期内掉线的 ghost 槽位（token 丢失时的重连兜底）。</summary>
+        private bool FindGhostByIp(string ip, out GhostSlot found)
+        {
+            found = null;
+            foreach (var kv in _ghosts)
+            {
+                if (kv.Value != null && string.Equals(kv.Value.Ip, ip, StringComparison.Ordinal))
+                {
+                    found = kv.Value;
+                    return true;
+                }
+            }
+            return false;
         }
 
         /// <summary>
@@ -1307,6 +1865,7 @@ namespace RL2Multiplayer
             slot.Token = token;
             slot.Offline = false;
             slot.OfflineSince = 0f;
+            slot.Ip = peer.Address != null ? peer.Address.ToString() : "";
             if (!resumed)
             {
                 slot.ClearRaceState();
@@ -1318,6 +1877,8 @@ namespace RL2Multiplayer
             w.Put(assignedId);
             w.Put(token);
             w.Put((byte)(resumed ? 1 : 0));
+            w.Put(ProtocolVersion);
+            w.Put(NetClock.HostNow);   // v2.5.0：主机时钟粗种子（客机 Seed 单程估计）
             peer.Send(w, DeliveryMethod.ReliableOrdered);
             Plugin.Log.LogInfo("[RL2MP] [NET] -> Welcome sent. assignedId=" + assignedId
                 + " token=" + token + " resumed=" + resumed
@@ -1350,6 +1911,25 @@ namespace RL2Multiplayer
 
             // 名单里先建好这个玩家的槽位（大厅/计分都按 id 索引）
             Roster.SyncSelf();
+
+            // v2.8.6：新客机一进来就告诉它主持人 + 已在场其他客机的名字
+            {
+                var nw = new NetDataWriter();
+                nw.Put((byte)MsgType.PlayerName);
+                nw.Put(LocalPlayerId);
+                nw.Put(Plugin.PlayerName);
+                peer.Send(nw, DeliveryMethod.ReliableOrdered);
+                foreach (var otherSlot in Roster.All)
+                {
+                    if (otherSlot.Id == LocalPlayerId || otherSlot.Id == assignedId) continue;
+                    if (string.IsNullOrEmpty(otherSlot.Name)) continue;
+                    var ow = new NetDataWriter();
+                    ow.Put((byte)MsgType.PlayerName);
+                    ow.Put(otherSlot.Id);
+                    ow.Put(otherSlot.Name);
+                    peer.Send(ow, DeliveryMethod.ReliableOrdered);
+                }
+            }
 
             // 计分规则 + 当前积分（新客机进来看板立刻是对的）
             SendScoreConfig(Score.Mode, Score.RoomPoints, Score.EnemyPoints, Score.BossPoints,
@@ -1466,6 +2046,7 @@ namespace RL2Multiplayer
                 }
                 _peerToPlayerId.Remove(peer.Id);
                 _clients.Remove(id);
+                RoomTravelSync.OnPeerGone(id);   // v3.0.7：门闩等待集合清掉断线对端
 
                 // v1.6.0：不销毁槽位。标记 Offline 并进入重连宽限期，
                 // 分数/用时/死亡数全部保留，带相同 token 回来就恢复。
@@ -1474,7 +2055,7 @@ namespace RL2Multiplayer
                 slot.OfflineSince = Time.realtimeSinceStartup;
                 slot.Ready = false;
                 slot.InWorld = false;
-                _ghosts[id] = new GhostSlot { PlayerId = id, Token = slot.Token, At = Time.realtimeSinceStartup };
+                _ghosts[id] = new GhostSlot { PlayerId = id, Token = slot.Token, At = Time.realtimeSinceStartup, Ip = slot.Ip };
 
                 Plugin.Log.LogInfo("[RL2MP] [NET] -> 客机 playerId=" + id
                     + " 掉线 -> 槽位进入宽限期（" + ReconnectGraceSeconds + "s），成绩保留。");
@@ -1561,6 +2142,7 @@ namespace RL2Multiplayer
             _reconnectAttempt = 0;
             _reconnectElapsed = 0f;
             _lastSentDowned = false;
+            ResetRunOverFlag();
 
             Plugin.Log.LogWarning("[RL2MP] [NET] *** 重连成功！恢复原 playerId=" + LocalPlayerId + "，槽位已还原。 ***");
 
@@ -1573,6 +2155,8 @@ namespace RL2Multiplayer
         {
             try
             {
+                // v2.5.0: 空包/畸形包绝不进分发（coop 安全网第一层）。
+                if (reader.AvailableBytes < 1) return;
                 byte type = reader.GetByte();
                 _recvCountSinceLastLog++;
 
@@ -1580,6 +2164,12 @@ namespace RL2Multiplayer
                 {
                     int requestedId = reader.GetInt();
                     int token = reader.GetInt();
+                    int peerProto = reader.AvailableBytes >= 4 ? reader.GetInt() : 0;
+                    if (peerProto != ProtocolVersion)
+                    {
+                        RejectIncompatible(peer, peerProto);
+                        return;
+                    }
                     HandleHello(peer, requestedId, token);
                 }
                 else if (type == (byte)MsgType.Welcome)
@@ -1587,6 +2177,28 @@ namespace RL2Multiplayer
                     int assignedId = reader.GetInt();
                     int token = reader.GetInt();
                     bool resumed = reader.GetByte() != 0;
+                    int hostProto = reader.AvailableBytes >= 4 ? reader.GetInt() : 0;
+                    if (hostProto != ProtocolVersion)
+                    {
+                        Plugin.Log.LogError("[RL2MP] [NET] 主机 mod 协议不一致（主机 " + FmtProto(hostProto)
+                            + " / 本机 " + FmtProto(ProtocolVersion) + "），断开连接。");
+                        ChatPanel.Receive("系统", "联机失败：两端 mod 版本不一致（主机 " + FmtProto(hostProto)
+                            + " / 本机 " + FmtProto(ProtocolVersion) + "）。请把两端的 RL-Mod.dll 换成同一版本。");
+                        _manualStop = true;   // 不要自动重连，否则会无限重试
+                        Stop();
+                        return;
+                    }
+
+                    // v2.5.0：主机时钟粗种子（旧主机无此字段则跳过，ping/pong 仍会收敛）。
+                    if (reader.AvailableBytes >= 8)
+                    {
+                        double hostClock = reader.GetDouble();
+                        if (NetValidation.IsFiniteD(hostClock))
+                        {
+                            NetClock.SeedFromWelcome(hostClock, _serverPeer != null ? _serverPeer.Ping : 0f);
+                            NetClock.ResetPings();
+                        }
+                    }
 
                     bool wasReconnecting = _reconnecting;
                     _sessionToken = token;
@@ -1619,9 +2231,12 @@ namespace RL2Multiplayer
                             _reconnectAttempt = 0;
                             _reconnectElapsed = 0f;
                             _lastSentDowned = false;
+                            ResetRunOverFlag();
                             // 客机也把自己的外观发过去，主机才能正确显示我的分身
                             CharacterSync.SendLocalCharacter();
                         }
+                        // v2.8.6：握手完成后立刻报上自己的自定义名字（主机收到会中转给其他客机）
+                        SendPlayerName();
                     }
                 }
                 else if (type == (byte)MsgType.LevelSeed)
@@ -1634,15 +2249,39 @@ namespace RL2Multiplayer
                         StartCoroutine(ClientAutoReEnterCo(seed));
                     }
                 }
+                else if (type == (byte)MsgType.TimePing)
+                {
+                    // v2.5.0：客机时钟探测——主机立即回 pong（不信任包内任何 id）。
+                    double clientTime = reader.GetDouble();
+                    if (IsHost && NetValidation.IsFiniteD(clientTime))
+                        ReplyTimePong(peer, clientTime);
+                }
+                else if (type == (byte)MsgType.TimePong)
+                {
+                    // v2.5.0：客机收 pong——喂入 ClockSync（合法性在 Core 内校验）。
+                    if (!IsHost)
+                    {
+                        double clientTime = reader.GetDouble();
+                        double hostTime = reader.GetDouble();
+                        NetClock.OnPong(clientTime, hostTime);
+                    }
+                }
                 else if (type == (byte)MsgType.PlayerState)
                 {
-                    int id = reader.GetInt();
+                    int claimed = reader.GetInt();
+                    int id;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out id)) return;
                     float x = reader.GetFloat();
                     float y = reader.GetFloat();
                     float vx = reader.GetFloat();
                     float vy = reader.GetFloat();
                     bool facingRight = reader.GetBool();
                     bool grounded = reader.GetBool();
+
+                    // v2.5.0: 坐标/速度合法性——坏包绝不进渲染层（防 2.38E-41 幻影坐标重演）。
+                    if (!NetValidation.Coord(x, y, "PlayerState")) return;
+                    vx = NetValidation.ClampVelocity(vx);
+                    vy = NetValidation.ClampVelocity(vy);
 
                     if (IsHost && id != HostId)
                     {
@@ -1666,11 +2305,9 @@ namespace RL2Multiplayer
                                 relayedTo++;
                             }
                         }
-                        // 只偶尔打印 relay 细节，避免刷屏
-                        if (_rateLimitTimer < 0.15f)
-                        {
-                            Plugin.Log.LogInfo("[RL2MP] [NET] HOST relayed PlayerState from id=" + id + " to " + relayedTo + " other client(s).");
-                        }
+                        // v2.5.2：不再每条都打日志（20Hz×两端=每秒数十行，真机刷屏拖慢帧率）。
+                        // 只累计，由下方 STATS 每 2 秒汇总一行。
+                        _relayCountSinceLastLog++;
                     }
 
                     if (id == LocalPlayerId)
@@ -1733,6 +2370,45 @@ namespace RL2Multiplayer
                         PlayerSync.Instance.HandleRemoteFlags(id, downed);
                     }
                 }
+                else if (type == (byte)MsgType.PlayerDown)
+                {
+                    int id = reader.GetInt();
+                    bool downed = reader.GetBool();
+
+                    if (IsHost && id != HostId)
+                    {
+                        RelayToOtherClients(id, delegate (NetDataWriter rw)
+                        {
+                            rw.Put((byte)MsgType.PlayerDown);
+                            rw.Put(id);
+                            rw.Put(downed);
+                        });
+                    }
+
+                    if (id != LocalPlayerId && PlayerSync.Instance != null)
+                    {
+                        PlayerSync.Instance.HandleRemoteFlags(id, downed);
+                    }
+                }
+                else if (type == (byte)MsgType.RunOver)
+                {
+                    int fromId = reader.GetInt();
+                    string reason = reader.GetString();
+
+                    // 主机收到客机的结束请求后要转发给其他客机，否则 3 人以上对局会分叉
+                    if (IsHost && fromId != HostId)
+                    {
+                        RelayToOtherClients(fromId, delegate (NetDataWriter rw)
+                        {
+                            rw.Put((byte)MsgType.RunOver);
+                            rw.Put(fromId);
+                            rw.Put(reason ?? "");
+                        });
+                    }
+
+                    Plugin.Log.LogInfo("[RL2MP] [RUNOVER] 收到对端(id=" + fromId + ")的本局结束通知：" + reason);
+                    DownedState.OnRunOverReceived(fromId);
+                }
                 else if (type == (byte)MsgType.CoOpRescue)
                 {
                     int targetId = reader.GetInt();
@@ -1752,10 +2428,21 @@ namespace RL2Multiplayer
                 }
                 else if (type == (byte)MsgType.EnemyDamage || type == (byte)MsgType.EnemyDied)
                 {
-                    int senderId = reader.GetInt();
+                    int claimed = reader.GetInt();
+                    int senderId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out senderId)) return;
                     int key = reader.GetInt();
                     bool died = type == (byte)MsgType.EnemyDied;
                     float dmg = died ? 0f : reader.GetFloat();
+                    // v2.2.0：附带怪物类型 + 世界坐标 —— 两端房间刷怪序号漂移时按
+                    // "同类型且位置最近"兜底匹配，避免伤害被静默丢弃（打不动怪）。
+                    int etype = reader.GetInt();
+                    float px = reader.GetFloat();
+                    float py = reader.GetFloat();
+
+                    // v2.5.0: 伤害与坐标校验——NaN/负数/超上限/幻影坐标一律丢弃。
+                    if (!died && !NetValidation.Damage(dmg, "EnemyDamage")) return;
+                    if (!NetValidation.Coord(px, py, "EnemyDamage")) return;
 
                     // 主机中转给其他客机（不回发送者本人）
                     if (IsHost)
@@ -1766,24 +2453,348 @@ namespace RL2Multiplayer
                             rw.Put(senderId);
                             rw.Put(key);
                             if (!died) rw.Put(dmg);
+                            rw.Put(etype);
+                            rw.Put(px);
+                            rw.Put(py);
                         });
                     }
 
                     // 发送者自己不应用（它本地已由原生伤害结算扣过血）
                     if (senderId != LocalPlayerId && EnemySync.Active)
                     {
-                        if (died) EnemySync.ApplyRemoteDeath(key);
-                        else EnemySync.ApplyRemoteDamage(key, dmg);
+                        if (died) EnemySync.ApplyRemoteDeath(key, etype, px, py);
+                        else EnemySync.ApplyRemoteDamage(key, dmg, etype, px, py);
                     }
                 }
                 else if (type == (byte)MsgType.EnemyStateSnapshot)
                 {
-                    // v1.8.0：主机权威血量快照——客机用它对账（晚加入 / 暂停错过事件 / 丢包都能追上）
-                    if (!IsHost && EnemySync.Active) EnemySync.ApplySnapshot(reader);
+                    // v1.8.0：权威血量快照——非权威端用它对账（晚加入/暂停错过事件/丢包都能追上）。
+                    // v3.0.0：主机倒地后客机是权威，此时主机是应用端，所以按令牌而非 IsHost。
+                    if (!RoomAuthority.IsLocalAuthority && EnemySync.Active) EnemySync.ApplySnapshot(reader);
+                }
+                else if (type == (byte)MsgType.EnemyAlive)
+                {
+                    // v2.5.0：权威存活集——非权威端据此补杀自己多出来的活怪。
+                    if (!RoomAuthority.IsLocalAuthority && EnemyAliveSync.Active) EnemyAliveSync.ApplyAlive(reader);
+                }
+                else if (type == (byte)MsgType.ObstaclePose)
+                {
+                    // v2.5.0：权威障碍物位置——非权威端存起来，LateUpdate 覆盖。
+                    if (!RoomAuthority.IsLocalAuthority && ObstacleSync.Active) ObstacleSync.ApplySnapshot(reader);
+                }
+                else if (type == (byte)MsgType.ObstacleRotation)
+                {
+                    // v2.9.0：权威旋转机关角度——非权威端 LateUpdate 覆盖 pivot。
+                    if (!RoomAuthority.IsLocalAuthority && ObstacleSync.Active) ObstacleSync.ApplyRotation(reader);
+                }
+                else if (type == (byte)MsgType.EnemyPosition)
+                {
+                    // v2.0.0：权威怪物位置——非权威端按 key 存字典，LateUpdate 覆盖本地怪 transform。
+                    if (!RoomAuthority.IsLocalAuthority && EnemyPositionSync.Active) EnemyPositionSync.ApplySnapshot(reader);
+                }
+                else if (type == (byte)MsgType.RoomTravel)
+                {
+                    // v2.3.2：全员换房——带 seq（补发/去重）+ 对端实际落点世界坐标（px,py）。
+                    // 房间坐标(cx,cy)在目标房间未激活时可能是 (0,0)，所以接收端优先用落点找房间。
+                    int claimed = reader.GetInt();
+                    int senderId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out senderId)) return;
+                    ushort seq = reader.GetUShort();
+                    float cx = reader.GetFloat();
+                    float cy = reader.GetFloat();
+                    float px = reader.GetFloat();
+                    float py = reader.GetFloat();
+                    byte side = reader.GetByte();
+                    int number = reader.GetInt();
+                    // v2.9.1：房间 transform 锚点（特殊房间 Coordinates 不可靠时的第二把钥匙）。
+                    float ax = reader.GetFloat();
+                    float ay = reader.GetFloat();
+                    // v3.0.22：目标房间所属 biome（-1 = 未知）。跨区域时对端本地没有
+                    // 那批房间对象，靠它在本地补建，观战视角才能跟过去。
+                    int biome = reader.GetInt();
+
+                    // v2.5.0: 换房坐标必须合法——这是历史"幻影坐标 2.38E-41"的源头。
+                    if (!NetValidation.Coord(cx, cy, "RoomTravel.room")) return;
+                    if (!NetValidation.Coord(px, py, "RoomTravel.landing")) return;
+                    if (!NetValidation.Coord(ax, ay, "RoomTravel.anchor")) return;
+                    // v3.0.23：跨区域过门时目标 biome 还没实例化、ConnectedDoor 为空，
+                    // 发送端（RoomTravelSync.PlayerExitPrefix）会按 v3.0.20 约定显式发
+                    // 未知门 side=255/number=-1。旧校验无条件拒绝 side>3，把跨区包全丢了，
+                    // 观战端永远收不到 biome → 补建/选房全链路失效。这里只对这一对
+                    // 我方自己产生的哨兵值放行，其余非法值照旧拒绝。
+                    bool unknownDoorSentinel = (side == 255 && number == -1);
+                    if (!unknownDoorSentinel && (side > 3 || number < 0 || number > 8))
+                    { NetValidation.Warn("RoomTravel 门参数非法 -> 丢包"); return; }
+
+                    if (IsHost && senderId != LocalPlayerId)
+                    {
+                        var rw = new NetDataWriter();
+                        rw.Put((byte)MsgType.RoomTravel);
+                        rw.Put(senderId);
+                        rw.Put(seq);
+                        rw.Put(cx); rw.Put(cy);
+                        rw.Put(px); rw.Put(py);
+                        rw.Put(side); rw.Put(number);
+                        rw.Put(ax); rw.Put(ay);
+                        rw.Put(biome);
+                        ForwardToOtherClients(senderId, rw);
+                    }
+                    RoomTravelSync.ApplyTravel(senderId, seq, cx, cy, side, number, px, py, ax, ay, biome);
+                }
+                else if (type == (byte)MsgType.RoomTravelAck)
+                {
+                    // v3.0.7：换房到位回执。ownerId = 换房发起者，ackerId = 跟随者，seq 对应哪次换房。
+                    int claimed = reader.GetInt();
+                    int ackerId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out ackerId)) return;
+                    int ownerId = reader.GetInt();
+                    ushort seq = reader.GetUShort();
+                    byte arrived = reader.GetByte();
+                    float rx = reader.GetFloat();
+                    float ry = reader.GetFloat();
+                    if (!NetValidation.PlayerId(ownerId, "RoomTravelAck.owner")) return;
+                    if (!NetValidation.Coord(rx, ry, "RoomTravelAck.room")) return;
+
+                    if (IsHost && ownerId != LocalPlayerId)
+                    {
+                        // 主机把跟随者的回执转给换房发起者（多客机场景）。
+                        var aw = new NetDataWriter();
+                        aw.Put((byte)MsgType.RoomTravelAck);
+                        aw.Put(ackerId);
+                        aw.Put(ownerId);
+                        aw.Put(seq);
+                        aw.Put(arrived);
+                        aw.Put(rx); aw.Put(ry);
+                        ForwardToOtherClients(ackerId, aw);
+                    }
+                    if (ownerId == LocalPlayerId)
+                        RoomTravelSync.HandleAck(ackerId, seq, arrived, rx, ry);
+                }
+                else if (type == (byte)MsgType.SceneChange)
+                {
+                    // v2.0.0：全员场景切换——任一端触发，主机中转，所有其他端跟随
+                    int senderId = reader.GetInt();
+                    int sceneId = reader.GetInt();
+                    int transitionId = reader.GetInt();
+                    if (IsHost && senderId != LocalPlayerId)
+                    {
+                        var sw = new NetDataWriter();
+                        sw.Put((byte)MsgType.SceneChange);
+                        sw.Put(senderId);
+                        sw.Put(sceneId); sw.Put(transitionId);
+                        ForwardToOtherClients(senderId, sw);
+                    }
+                    if (senderId != LocalPlayerId) SceneChangeSync.FollowHost(senderId, sceneId, transitionId);
+                }
+                else if (type == (byte)MsgType.BossProgress)
+                {
+                    // v2.0.1：权威 Boss 位图——非权威端内存对齐门状态（不动自己存档收益）。
+                    // v3.0.0：主机倒地时客机是权威，主机退为应用端，按令牌判定。
+                    ushort mask = reader.GetUShort();
+                    if (!RoomAuthority.IsLocalAuthority) BossProgressSync.ApplySnapshot(mask);
+                }
+                else if (type == (byte)MsgType.SkillTree)
+                {
+                    // v2.0.2：协作技能树共享——取 max 并集，写各自存档
+                    SkillTreeSync.OnReceive(reader);
+                }
+                else if (type == (byte)MsgType.PlayerHurt)
+                {
+                    // v2.1.0：分身受击——被击中的分身所在端转发给真身持有者，主机顺带中转（3 人局）
+                    int claimed = reader.GetInt();
+                    int senderId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out senderId)) return;
+                    int targetId = reader.GetInt();
+                    float hDmg = reader.GetFloat();
+                    float hStun = reader.GetFloat();
+                    float hSx = reader.GetFloat();
+                    float hSy = reader.GetFloat();
+
+                    // v2.5.0: 伤害/眩晕/来源坐标校验。
+                    if (!NetValidation.Damage(hDmg, "PlayerHurt")) return;
+                    hStun = NetValidation.ClampAmount(hStun);
+                    if (!NetValidation.Coord(hSx, hSy, "PlayerHurt")) return;
+                    if (!NetValidation.PlayerId(targetId, "PlayerHurt.targetId")) return;
+
+                    if (IsHost && senderId != LocalPlayerId && targetId != LocalPlayerId
+                        && targetId != senderId)
+                    {
+                        RelayToOtherClients(senderId, delegate (NetDataWriter rw)
+                        {
+                            rw.Put((byte)MsgType.PlayerHurt);
+                            rw.Put(senderId);
+                            rw.Put(targetId);
+                            rw.Put(hDmg);
+                            rw.Put(hStun);
+                            rw.Put(hSx);
+                            rw.Put(hSy);
+                        });
+                    }
+
+                    PlayerHurtSync.OnReceive(senderId, targetId, hDmg, hStun, hSx, hSy);
+                }
+                else if (type == (byte)MsgType.DashFx)
+                {
+                    // v1.8.4：冲刺/虚冲特效事件——主机中转，其他端补放残影
+                    int dashOwner = reader.GetInt();
+                    bool dashVoid = reader.GetBool();
+                    if (IsHost && dashOwner != HostId)
+                    {
+                        var dw = new NetDataWriter();
+                        dw.Put((byte)MsgType.DashFx);
+                        dw.Put(dashOwner);
+                        dw.Put(dashVoid);
+                        ForwardToOtherClients(dashOwner, dw);
+                    }
+                    if (dashOwner != LocalPlayerId) DashFxSync.PlayRemoteDash(dashOwner, dashVoid);
+                }
+                else if (type == (byte)MsgType.AbilityFx)
+                {
+                    // v3.0.2：施法动画事件——主机中转 + 校验，其他端从 0 重放一次。
+                    int fxOwner = reader.GetInt();
+                    int fxLayer = reader.GetByte();
+                    int fxHash = reader.GetInt();
+                    byte fxState = reader.GetByte();
+                    int resolvedFxOwner;
+                    if (!NetValidation.ResolveSender(this, peer, fxOwner, out resolvedFxOwner)) return;
+                    if (fxLayer < 0 || fxLayer > 15 || fxHash == 0) return;
+                    if (IsHost && resolvedFxOwner != HostId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.AbilityFx);
+                        fw.Put(resolvedFxOwner);
+                        fw.Put((byte)fxLayer);
+                        fw.Put(fxHash);
+                        fw.Put(fxState);
+                        ForwardToOtherClients(resolvedFxOwner, fw);
+                    }
+                    if (resolvedFxOwner != LocalPlayerId)
+                        AbilityFxSync.PlayRemoteFx(resolvedFxOwner, fxLayer, fxHash, fxState);
+                }
+                else if (type == (byte)MsgType.SpellFx)
+                {
+                    // v3.0.5：动画特效主动事件——主机中转 + 校验，其他端在分身上重建播放。
+                    var fx = AbilityFxSync.SpellFxData.Read(reader);
+                    if (fx == null) return;
+                    int resolvedFxOwner;
+                    if (!NetValidation.ResolveSender(this, peer, fx.OwnerId, out resolvedFxOwner)) return;
+                    fx.OwnerId = resolvedFxOwner;
+                    if (IsHost && resolvedFxOwner != HostId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.SpellFx);
+                        fx.Write(fw);
+                        ForwardToOtherClients(resolvedFxOwner, fw);
+                    }
+                    if (resolvedFxOwner != LocalPlayerId)
+                        AbilityFxSync.PlayRemoteSpellFx(fx);
+                }
+                else if (type == (byte)MsgType.SpellFxStop)
+                {
+                    // v3.0.9：特效取消——主机中转 + 校验，其他端停掉分身上该 Owner 的同名特效。
+                    int stopOwnerRaw = reader.GetInt();
+                    string stopName = reader.GetString();
+                    int resolvedStopOwner;
+                    if (!NetValidation.ResolveSender(this, peer, stopOwnerRaw, out resolvedStopOwner)) return;
+                    if (IsHost && resolvedStopOwner != HostId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.SpellFxStop);
+                        fw.Put(resolvedStopOwner);
+                        fw.Put(stopName ?? string.Empty);
+                        ForwardToOtherClients(resolvedStopOwner, fw);
+                    }
+                    if (resolvedStopOwner != LocalPlayerId)
+                        AbilityFxSync.StopRemoteSpellFx(resolvedStopOwner, stopName);
+                }
+                else if (type == (byte)MsgType.CodeFx)
+                {
+                    // v3.0.17：代码直调 PlayEffect 的特效——主机中转 + 校验，对端在分身上重放。
+                    var codeFx = AbilityFxSync.CodeFxData.Read(reader);
+                    if (codeFx == null) return;
+                    int resolvedCodeOwner;
+                    if (!NetValidation.ResolveSender(this, peer, codeFx.OwnerId, out resolvedCodeOwner)) return;
+                    codeFx.OwnerId = resolvedCodeOwner;
+                    if (IsHost && resolvedCodeOwner != HostId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.CodeFx);
+                        codeFx.Write(fw);
+                        ForwardToOtherClients(resolvedCodeOwner, fw);
+                    }
+                    if (resolvedCodeOwner != LocalPlayerId)
+                        AbilityFxSync.PlayRemoteCodeFx(codeFx);
+                }
+                else if (type == (byte)MsgType.WorldState)
+                {
+                    // v3.0.23：一次性世界状态（易碎品破碎/特殊房完成）。主机中转 + sender 校验，
+                    // 对端写 RoomSaveData 并对已实例化道具立刻应用"已用"外观。
+                    int claimed = reader.GetInt();
+                    int resolvedSender;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out resolvedSender)) return;
+                    byte wKind = reader.GetByte();
+                    int wBiome = reader.GetInt();
+                    int wRoom = reader.GetInt();
+                    int wSpawn = reader.GetInt();
+                    int wSub = reader.GetInt();
+                    bool wFlag = reader.GetBool();
+                    if (wKind > 2 || wBiome < 0 || wRoom < 0 || wSpawn < 0 || wSub < 0) return;
+                    if (IsHost && resolvedSender != LocalPlayerId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.WorldState);
+                        fw.Put(resolvedSender);
+                        fw.Put(wKind); fw.Put(wBiome); fw.Put(wRoom);
+                        fw.Put(wSpawn); fw.Put(wSub); fw.Put(wFlag);
+                        ForwardToOtherClients(resolvedSender, fw);
+                    }
+                    WorldStateSync.ApplyRemote(resolvedSender, wKind, wBiome, wRoom, wSpawn, wSub, wFlag);
+                }
+                else if (type == (byte)MsgType.RunStart)
+                {
+                    // v3.0.25：开局流程同步（交钱给 Charon + 锁城堡/世界锁 + 动画）。
+                    // 主机中转 + sender 校验，收到端调用游戏自己的同一套逻辑。
+                    int claimed = reader.GetInt();
+                    int resolvedSender;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out resolvedSender)) return;
+                    byte rsLock = reader.GetByte();
+                    byte rsFlags = reader.GetByte();
+                    if (rsLock > 20 || rsFlags > 1) return;
+                    if (IsHost && resolvedSender != LocalPlayerId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.RunStart);
+                        fw.Put(resolvedSender);
+                        fw.Put(rsLock);
+                        fw.Put(rsFlags);
+                        ForwardToOtherClients(resolvedSender, fw);
+                    }
+                    RunStartSync.ApplyRemote(resolvedSender, rsLock, rsFlags);
+                }
+                else if (type == (byte)MsgType.Challenge)
+                {
+                    // v3.0.26：挑战会合门闩。两端都选好同一个挑战才一起进漂流屋的挑战。
+                    int claimed = reader.GetInt();
+                    int resolvedSender;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out resolvedSender)) return;
+                    byte chState = reader.GetByte();
+                    int chType = reader.GetInt();
+                    if (chState > 1 || chType < 0) return;
+                    if (IsHost && resolvedSender != LocalPlayerId)
+                    {
+                        var fw = new NetDataWriter();
+                        fw.Put((byte)MsgType.Challenge);
+                        fw.Put(resolvedSender);
+                        fw.Put(chState);
+                        fw.Put(chType);
+                        ForwardToOtherClients(resolvedSender, fw);
+                    }
+                    ChallengeSync.ApplyRemote(resolvedSender, chState, chType);
                 }
                 else if (type == (byte)MsgType.Projectile)
                 {
                     int id = reader.GetInt();
+                    uint spawnId = reader.GetUInt();  // v2.7.0：跨端关联发射/消失
                     string pname = reader.GetString();
                     float px = reader.GetFloat(); float py = reader.GetFloat(); float pz = reader.GetFloat();
                     float eulerZ = reader.GetFloat();
@@ -1806,6 +2817,7 @@ namespace RL2Multiplayer
                         {
                             rw.Put((byte)MsgType.Projectile);
                             rw.Put(id);
+                            rw.Put(spawnId);
                             rw.Put(pname);
                             rw.Put(px); rw.Put(py); rw.Put(pz);
                             rw.Put(eulerZ);
@@ -1825,9 +2837,41 @@ namespace RL2Multiplayer
 
                     if (id != LocalPlayerId)
                     {
-                        ProjectileSync.SpawnRemoteVisual(id, pname, px, py, pz, eulerZ, scaleX,
+                        ProjectileSync.SpawnRemoteVisual(id, spawnId, pname, px, py, pz, eulerZ, scaleX,
                             hx, hy, speed, accX, accY, snap, snapLx, snapLy, snapLz, snapRotZ, lifespan);
                     }
+                }
+                else if (type == (byte)MsgType.ProjectileDespawn)
+                {
+                    int id = reader.GetInt();
+                    uint spawnId = reader.GetUInt();
+                    if (IsHost && id != HostId)
+                    {
+                        var dw = new NetDataWriter();
+                        dw.Put((byte)MsgType.ProjectileDespawn);
+                        dw.Put(id);
+                        dw.Put(spawnId);
+                        ForwardToOtherClients(id, dw);
+                    }
+                    if (id != LocalPlayerId) ProjectileSync.HandleRemoteDespawn(id, spawnId);
+                }
+                else if (type == (byte)MsgType.ProjectilePose)
+                {
+                    // v3.0.6：弹体姿态（火环 carousel 旋转）——主机中转 + 校验，其他端覆盖视觉弹。
+                    var batch = ProjectileSync.PoseBatch.Read(reader);
+                    if (batch == null) return;
+                    int resolvedPoseOwner;
+                    if (!NetValidation.ResolveSender(this, peer, batch.OwnerId, out resolvedPoseOwner)) return;
+                    batch.OwnerId = resolvedPoseOwner;
+                    if (IsHost && resolvedPoseOwner != HostId)
+                    {
+                        var pw = new NetDataWriter();
+                        pw.Put((byte)MsgType.ProjectilePose);
+                        batch.Write(pw);
+                        ForwardPoseToOtherClients(resolvedPoseOwner, pw);
+                    }
+                    if (resolvedPoseOwner != LocalPlayerId)
+                        ProjectileSync.ApplyPose(batch);
                 }
                 else if (type == (byte)MsgType.RaceConfig)
                 {
@@ -2029,6 +3073,54 @@ namespace RL2Multiplayer
                     int ng = reader.GetInt();
                     Plugin.Log.LogInfo("[RL2MP] [NET] RECV NewGame: 主机开启了新周目 NG+=" + ng);
                     RaceRulesSync.OnHostNewGame(ng);
+                }
+                else if (type == (byte)MsgType.Chat)
+                {
+                    int claimed = reader.GetInt();
+                    int senderId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out senderId)) return;
+                    string text = NetValidation.Text(reader.GetString());
+                    // 主机中转给其他客机
+                    if (IsHost && senderId != LocalPlayerId)
+                    {
+                        var cw = new NetDataWriter();
+                        cw.Put((byte)MsgType.Chat);
+                        cw.Put(senderId);
+                        cw.Put(text);
+                        ForwardToOtherClients(senderId, cw);
+                    }
+                    var chatSlot = Roster.Get(senderId);
+                    string tag = string.IsNullOrEmpty(chatSlot.Name)
+                        ? (senderId == HostId ? "主机" : ("P" + senderId)) : chatSlot.Name;
+                    ChatPanel.Receive(tag, text);
+                }
+                else if (type == (byte)MsgType.PlayerName)
+                {
+                    int claimed = reader.GetInt();
+                    int senderId;
+                    if (!NetValidation.ResolveSender(this, peer, claimed, out senderId)) return;
+                    string name = NetValidation.Text(reader.GetString());
+                    if (name != null && name.Length > 16) name = name.Substring(0, 16);
+                    if (string.IsNullOrEmpty(name)) return;
+                    Roster.Get(senderId).Name = name;
+                    Plugin.Log.LogInfo("[RL2MP] [NET] RECV PlayerName P" + senderId + " -> '" + name + "'");
+                    // 主机中转给其他客机；客机侧 ResolveSender 信任主机盖章的 id
+                    if (IsHost && senderId != LocalPlayerId)
+                    {
+                        var nw = new NetDataWriter();
+                        nw.Put((byte)MsgType.PlayerName);
+                        nw.Put(senderId);
+                        nw.Put(name);
+                        ForwardToOtherClients(senderId, nw);
+                    }
+                }
+                else if (type == (byte)MsgType.PlayerKicked)
+                {
+                    string reason = reader.GetString();
+                    Plugin.Log.LogWarning("[RL2MP] [NET] 被房主踢出: " + reason);
+                    ChatPanel.Receive("系统", "你被房主移出房间：" + reason);
+                    _manualStop = true; // 被踢后不要自动重连
+                    Stop();
                 }
                 else
                 {

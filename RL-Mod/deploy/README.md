@@ -1,3 +1,11 @@
+#前文
+
+虽然很不想用ai写md，但是他写的太好了，不用白不用，如果想简便的看这段就行
+
+我上传了以下内容，源代码还有
+
+
+
 # Rogue Legacy 2 竞速联机 Mod（RL-Mod）
 
 基于 BepInEx + Harmony 的 Rogue Legacy 2 多人竞速模组。最多 **4 人**（1 主机 + 3 客机）在同一张地图上比拼：要么比谁先打死终点 Boss（比用时），要么比谁积分更高（比得分）。
@@ -25,7 +33,7 @@
 
 - **同一张地图**：主机把世界地图（房间布局）完整同步给所有客机，大家探索的是同一座城堡。
 - **规则同步**：新周目（NG+）等级、最高通关数、全部累赘（Burden）等级自动同步，双方挑战难度一致。
-- **互相可见**：实时位置/朝向/动画同步（20Hz 位置 + 10Hz 动画 + 事件型状态包），倒地、复活状态互相可见。
+- **互相可见**：实时位置/朝向/动画同步（20Hz 位置 + 10Hz 动画 + 事件型状态包），倒地、复活状态互相可见；虚冲/冲刺残影特效也同步（事件型补 Trigger + 限时放行特效）。
 - **两种玩法**（主机面板切换，与判定方式正交）：
   - **竞速**：各跑各的，先打死终点 Boss 者胜。
   - **双人协作**：同图协作、不比名次，右上角只显示存活时间；倒地留尸体待救（见下）。
@@ -54,7 +62,7 @@
 1. 把以下两个文件放进游戏的 `BepInEx/plugins/` 目录：
    - `RL-Mod.dll`
    - `LiteNetLib.dll`
-2. 启动游戏，BepInEx 控制台（或 `BepInEx/LogOutput.log`）出现 `[RL2MP] === Plugin Awake START (v1.8.2) ===` 即加载成功。
+2. 启动游戏，BepInEx 控制台（或 `BepInEx/LogOutput.log`）出现 `[RL2MP] === Plugin Awake START (v1.8.4) ===` 即加载成功。
 3. 首次运行会在 `BepInEx/config/` 生成 `com.rl2.mp.cfg`，里面有主机地址等配置（也可在游戏内面板修改）。
 
 > **注意：所有玩家必须使用相同版本的 mod。** 协议格式随版本变化，新旧版本混用会连不上。
@@ -284,7 +292,8 @@ dotnet build RL-Mod.csproj -v q -nologo
 | 1.8.0 | **修复「暂停 / 晚进房 / 丢包」导致共享血量错乱**。根因：旧版共享血量是纯事件型（谁打怪就把伤害事件发给对端），错过那一刻事件的端永远拿不到当前血量——主机在客机进房前把怪打到半血，客机端生成的是满血怪；主机打死的怪客机端留存。修复：①主机权威血量快照——每 0.4s(unscaled) 广播当前所有敌人 key→hpPct + 死亡墓碑（新MsgType.EnemyStateSnapshot=35，Sequenced），客机按 key 幂等向下校正血量、按墓碑补杀（补杀窗口 8s 覆盖晚进房）；②网络泵改为 Update + onBeforeRender 双驱动（frameCount 守卫防重入），暂停(timeScale=0)期间照常收发，血量快照用 unscaledDeltaTime 计时不受暂停影响。竞速玩法行为完全不变 |
 | 1.8.1 | **墓碑永久化**：按用户要求去掉死亡墓碑的 8 秒过期限制——强者杀光的怪在本层楼内永久标记死亡，弱者无论多晚进房都保持死亡（只在换楼层/回城 sceneLoaded 时清空）。配套修复：墓碑 key 加入房间坐标区分不同房间；墓碑数量上限 512→2048。竞速玩法行为完全不变 |
 | 1.8.2 | **修复 v1.8.1 引入的「墓碑不生效 + 严重卡顿」**。根因①：v1.8.1 的房间坐标 key 用运行时世界坐标 `Room.Coordinates`×10 取整，两端算出的值不一致（日志证实「收到伤害 key=… 未找到对应怪」），导致墓碑命不中、伤害转发也失效 → 回退到 v1.8.0 已验证能匹配的 key（场景名+EnemyIndex+类型+等级），墓碑永久化保留。根因②：网络泵挂在 `onBeforeRender`（渲染路径）+ 每次伤害/收快照都 `FindObjectsOfType` 全场景扫描 → 移除 onBeforeRender 里的网络泵（暂停时 Update 用 unscaledDeltaTime 本就照常收发，无需第二驱动），敌人列表缓存 0.25s 把扫描从"每次事件"降到约 4 次/秒。竞速玩法行为完全不变 |
+| 1.8.3 | **修复「客机施法在主机端一直卡顿/抽搐」**。根因：法术属一次性动画(loop=false)，接收端旧逻辑没有像循环动画那样加 `age` 时间预测，`predN=t` 天然落后分身本地 60fps 进度 → `predF<curF` 每帧成立被误判成"对端重新施法"，反复 `Play` 把动画拉回旧进度。修复：一次性动画同样加 age 预测；真正的"重新施法"改用【网络 t 回卷】判定而非本地进度比较；加节流动画诊断日志(`[ANIM] replay layer=...`)便于定位。竞速玩法行为完全不变 |
+| 1.8.4 | **修复「虚空冲刺特效不显示，只看到位移」**。根因两层：①虚冲残影靠 Animator 的 `Dashing_Effect` Trigger 驱动，网络动画同步只传 float/int/bool + 层状态 scrub，Trigger 传不过去 → 分身不进特效状态；②即便进了，分身 Animator 被加进 `EffectManager` 全局特效禁用列表（防攻击二次伤害），`EffectTriggerAnimBehaviour.OnStateEnter` 直接 return → 残影被吞；③动态特效对象 `MirrorFx` 也覆盖不到。修复：新增专用冲刺特效事件(MsgType.DashFx=36，ReliableOrdered)——本地冲刺(InitiateDash postfix)广播，接收端给分身补 `SetTrigger("Dashing_Effect")`+`SetBool("VoidDash")`，并把分身 Animator 加入限时豁免集合(1.2s，patch `AnimatorEffectsDisabled` 放行)，窗口过后恢复禁用。纯视觉，不改伤害/判定；竞速玩法行为不变 |
 
 ---
 
-*祝竞速愉快，别死于自己的贪婪。*

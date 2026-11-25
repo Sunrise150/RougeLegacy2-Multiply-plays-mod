@@ -1,0 +1,101 @@
+{
+  "version": 3,
+  "targets": {
+    "net8.0": {
+      "RL-Mod.Core/1.0.0": {
+        "type": "project",
+        "framework": ".NETStandard,Version=v2.0",
+        "compile": {
+          "bin/placeholder/RL-Mod.Core.dll": {}
+        },
+        "runtime": {
+          "bin/placeholder/RL-Mod.Core.dll": {}
+        }
+      }
+    }
+  },
+  "libraries": {
+    "RL-Mod.Core/1.0.0": {
+      "type": "project",
+      "path": "../RL-Mod.Core/RL-Mod.Core.csproj",
+      "msbuildProject": "../RL-Mod.Core/RL-Mod.Core.csproj"
+    }
+  },
+  "projectFileDependencyGroups": {
+    "net8.0": [
+      "RL-Mod.Core >= 1.0.0"
+    ]
+  },
+  "packageFolders": {
+    "C:\\Users\\xiaowang\\.nuget\\packages\\": {},
+    "D:\\NuGetPackages": {}
+  },
+  "project": {
+    "version": "1.0.0",
+    "restore": {
+      "projectUniqueName": "D:\\RL-Mod\\RL-Mod.Tests\\RL-Mod.Tests.csproj",
+      "projectName": "RL-Mod.Tests",
+      "projectPath": "D:\\RL-Mod\\RL-Mod.Tests\\RL-Mod.Tests.csproj",
+      "packagesPath": "C:\\Users\\xiaowang\\.nuget\\packages\\",
+      "outputPath": "D:\\RL-Mod\\RL-Mod.Tests\\obj\\",
+      "projectStyle": "PackageReference",
+      "fallbackFolders": [
+        "D:\\NuGetPackages"
+      ],
+      "configFilePaths": [
+        "C:\\Users\\xiaowang\\AppData\\Roaming\\NuGet\\NuGet.Config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.FallbackLocation.config",
+        "C:\\Program Files (x86)\\NuGet\\Config\\Microsoft.VisualStudio.Offline.config"
+      ],
+      "originalTargetFrameworks": [
+        "net8.0"
+      ],
+      "sources": {
+        "C:\\Program Files (x86)\\Microsoft SDKs\\NuGetPackages\\": {},
+        "https://api.nuget.org/v3/index.json": {}
+      },
+      "frameworks": {
+        "net8.0": {
+          "targetAlias": "net8.0",
+          "projectReferences": {
+            "D:\\RL-Mod\\RL-Mod.Core\\RL-Mod.Core.csproj": {
+              "projectPath": "D:\\RL-Mod\\RL-Mod.Core\\RL-Mod.Core.csproj"
+            }
+          }
+        }
+      },
+      "warningProperties": {
+        "warnAsError": [
+          "NU1605"
+        ]
+      },
+      "restoreAuditProperties": {
+        "enableAudit": "true",
+        "auditLevel": "low",
+        "auditMode": "direct"
+      }
+    },
+    "frameworks": {
+      "net8.0": {
+        "targetAlias": "net8.0",
+        "imports": [
+          "net461",
+          "net462",
+          "net47",
+          "net471",
+          "net472",
+          "net48",
+          "net481"
+        ],
+        "assetTargetFallback": true,
+        "warn": true,
+        "frameworkReferences": {
+          "Microsoft.NETCore.App": {
+            "privateAssets": "all"
+          }
+        },
+        "runtimeIdentifierGraphPath": "C:\\Program Files\\dotnet\\sdk\\8.0.303/PortableRuntimeIdentifierGraph.json"
+      }
+    }
+  }
+}

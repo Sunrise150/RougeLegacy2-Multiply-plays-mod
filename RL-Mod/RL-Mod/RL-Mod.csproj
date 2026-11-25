@@ -1,4 +1,4 @@
-<?xml version="1.0" encoding="utf-8"?>
+﻿<?xml version="1.0" encoding="utf-8"?>
 <Project ToolsVersion="15.0" xmlns="http://schemas.microsoft.com/developer/msbuild/2003">
   <Import Project="$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props" Condition="Exists('$(MSBuildExtensionsPath)\$(MSBuildToolsVersion)\Microsoft.Common.props')" />
   <PropertyGroup>
@@ -43,6 +43,10 @@
     <Reference Include="LiteNetLib">
       <HintPath>Libs\LiteNetLib.dll</HintPath>
     </Reference>
+    <!-- v2.5.1: 净室逻辑层源码直接内联编译进主 DLL，不再引用外部 RL-Mod.Core.dll。
+         原因：netstandard2.0 程序集在 Unity 2020.3/.NET4.x Mono 下类型加载失败
+         （Could not find method due to a type load error），导致收包/握手全废。
+         Core 源码是纯 C#，按源码内联后运行期零跨程序集依赖；测试项目仍单独引用 Core 工程。 -->
     <Reference Include="System" />
     <Reference Include="System.Core" />
     <Reference Include="System.Xml.Linq" />
@@ -63,6 +67,9 @@
     <Reference Include="UnityEngine.IMGUIModule">
       <HintPath>Libs\UnityEngine.IMGUIModule.dll</HintPath>
     </Reference>
+    <Reference Include="UnityEngine.UI">
+      <HintPath>Libs\UnityEngine.UI.dll</HintPath>
+    </Reference>
     <Reference Include="UnityEngine.AnimationModule">
       <HintPath>Libs\UnityEngine.AnimationModule.dll</HintPath>
     </Reference>
@@ -72,6 +79,9 @@
     <Reference Include="UnityEngine.ParticleSystemModule">
       <HintPath>Libs\UnityEngine.ParticleSystemModule.dll</HintPath>
     </Reference>
+    <Reference Include="UnityEngine.Physics2DModule">
+      <HintPath>Libs\UnityEngine.Physics2DModule.dll</HintPath>
+    </Reference>
   </ItemGroup>
   <ItemGroup>
     <Compile Include="Plugin.cs" />
@@ -79,7 +89,37 @@
     <Compile Include="Downed.cs" />
     <Compile Include="CoOpRescue.cs" />
     <Compile Include="EnemySync.cs" />
+    <Compile Include="EnemyPositionSync.cs" />
+    <Compile Include="BossProgressSync.cs" />
+    <Compile Include="SkillTreeSync.cs" />
+    <Compile Include="RoomTravelSync.cs" />
+    <Compile Include="BiomeRoomBuilder.cs" />
+    <Compile Include="WorldStateSync.cs" />
+    <Compile Include="RunStartSync.cs" />
+    <Compile Include="ChallengeSync.cs" />
+    <Compile Include="PlayerHurtSync.cs" />
+    <Compile Include="RemoteHurtbox.cs" />
+    <Compile Include="RemoteTargetProxy.cs" />
+    <Compile Include="CoOpFixes.cs" />
+    <Compile Include="NetValidation.cs" />
+    <Compile Include="NetClock.cs" />
+    <Compile Include="EnemyAliveSync.cs" />
+    <Compile Include="ObstacleSync.cs" />
+    <Compile Include="SceneChangeSync.cs" />
+    <Compile Include="DashFxSync.cs" />
+    <Compile Include="AbilityFxSync.cs" />
+    <Compile Include="PauseCompat.cs" />
+    <Compile Include="BackgroundRun.cs" />
+    <Compile Include="ConfigProfiles.cs" />
+    <Compile Include="MpHub.cs" />
+    <Compile Include="MainMenuHubButton.cs" />
+    <Compile Include="PauseMenuHubTab.cs" />
+    <Compile Include="SaveInfoView.cs" />
+    <Compile Include="ChatPanel.cs" />
+    <Compile Include="HubButtonHover.cs" />
     <Compile Include="NetworkManager.cs" />
+    <Compile Include="AuthorityRoom.cs" />
+    <Compile Include="RoomAuthority.cs" />
     <Compile Include="PlayerSync.cs" />
     <Compile Include="SeedSync.cs" />
     <Compile Include="MapSync.cs" />
@@ -88,8 +128,33 @@
     <Compile Include="Score.cs" />
     <Compile Include="ProjectileSync.cs" />
     <Compile Include="RoomFix.cs" />
+    <Compile Include="DoorLinkFix.cs" />
     <Compile Include="Players.cs" />
     <Compile Include="Properties\AssemblyInfo.cs" />
+    <!-- v2.5.1: RL-Mod.Core 净室逻辑源码内联（替代外部程序集引用） -->
+    <Compile Include="..\RL-Mod.Core\Sync\ClockSync.cs">
+      <Link>Core\ClockSync.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Sync\SnapshotBuffer.cs">
+      <Link>Core\SnapshotBuffer.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Sync\Interp.cs">
+      <Link>Core\Interp.cs</Link>
+    </Compile>
+    <Compile Include="..\RL-Mod.Core\Protocol\Validation.cs">
+      <Link>Core\Validation.cs</Link>
+    </Compile>
   </ItemGroup>
+  <!-- v3.0.5：编译成功后自动把 DLL 部署到两端 plugins，省去手动复制。
+       v3.0.5-hotfix：每条 copy 前加 if exist 判断目标目录——
+       在只有单端游戏的那台机器编译时，另一端路径不存在会弹"找不到指定位置"，
+       虽然 DLL 已成功复制，VS 仍显示为错误。if exist 让缺失的那一端静默跳过。
+       exit /b 0 保证"游戏开着、DLL 被占用"时复制失败也不会让编译本身报错；
+       部署是否成功看命令行输出的 "1 file(s) copied"。 -->
+  <PropertyGroup>
+    <PostBuildEvent>if exist "D:\Rogue.Legacy.2\Rogue Legacy 2\BepInEx\plugins" copy /Y "$(TargetPath)" "D:\Rogue.Legacy.2\Rogue Legacy 2\BepInEx\plugins\RL-Mod.dll"
+if exist "D:\Rogue.Legacy.2testing\Rogue Legacy 2\BepInEx\plugins" copy /Y "$(TargetPath)" "D:\Rogue.Legacy.2testing\Rogue Legacy 2\BepInEx\plugins\RL-Mod.dll"
+exit /b 0</PostBuildEvent>
+  </PropertyGroup>
   <Import Project="$(MSBuildToolsPath)\Microsoft.CSharp.targets" />
 </Project>

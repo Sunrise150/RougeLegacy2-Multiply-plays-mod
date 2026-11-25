@@ -43,7 +43,14 @@ namespace RL2Multiplayer
         // 缓存项即使已死/被销毁，使用处都有 e==null || e.IsDead 兜底，安全。
         private static EnemyController[] _enemyCache;
         private static float _enemyCacheTime;
-        private const float EnemyCacheLifetime = 0.25f;
+        private const float EnemyCacheLifetime = 0.4f;
+        // v2.0.6：复用 writer，避免每 0.4s 一次的新分配（GC 抖动）
+        private static readonly NetDataWriter _snapWriter = new NetDataWriter();
+        // v2.0.6：墓碑分片轮转发送（单包不超过 MTU）
+        private const int TombPerPacket = 64;
+        private const int MaxSnapshotEnemies = 48;   // 8B×48=384，加墓碑仍稳在 MTU 内
+        private static readonly List<int> _tombBuf = new List<int>(TombPerPacket);
+        private static int _tombSkip;
         private static EnemyController[] GetEnemies()
         {
             float now = Time.unscaledTime;
@@ -51,9 +58,34 @@ namespace RL2Multiplayer
             {
                 _enemyCache = UnityEngine.Object.FindObjectsOfType<EnemyController>();
                 _enemyCacheTime = now;
+                _keyCache.Clear();   // v2.0.6：实例换了，旧 key 缓存作废（也顺手防泄漏）
             }
             return _enemyCache;
         }
+
+        // ---------------- v2.0.6：key 计算提速 ----------------
+        // 原实现每算一次 key 都调 SceneManager.GetActiveScene().name —— Scene.name 每次访问
+        // 都会从原生层分配一个新的 string。位置同步在客机上是"每帧 × 每只怪"调用，
+        // 60fps × 50 只怪 = 3000 次/秒分配，GC 周期一来就是明显掉帧（用户反馈的画面卡顿）。
+        // 这里把场景名哈希按 scene.handle 缓存，再给每只怪缓存一次 int key。
+        private static int _sceneHash;
+        private static int _sceneHandle = int.MinValue;
+        private static readonly Dictionary<EnemyController, int> _keyCache = new Dictionary<EnemyController, int>();
+
+        private static int SceneHash()
+        {
+            var sc = UnityEngine.SceneManagement.SceneManager.GetActiveScene();
+            if (sc.handle != _sceneHandle)
+            {
+                _sceneHandle = sc.handle;
+                string n = sc.name;
+                _sceneHash = n != null ? n.GetHashCode() : 0;
+                _keyCache.Clear();
+            }
+            return _sceneHash;
+        }
+        // v2.0.0：位置同步模块复用同一份 0.25s 缓存（避免又一次全场景扫描）
+        internal static EnemyController[] GetEnemiesForPosition() { return GetEnemies(); }
         private static float _lastSnapLog;
         // v1.8.1：墓碑永久保留（每层楼内）。强者杀光的怪，弱者无论多晚进房都保持死亡。
         // 只在换场景（换楼层/回城）时由 ResetAll 清空——那时是全新一层，旧墓碑不再适用。
@@ -75,7 +107,7 @@ namespace RL2Multiplayer
         /// </summary>
         internal static void HostTick()
         {
-            if (!Active || NetworkManager.Instance == null || !NetworkManager.Instance.IsHost) return;
+            if (!Active || NetworkManager.Instance == null || !RoomAuthority.ShouldDriveWorld) return;
 
             _snapshotTimer += Time.unscaledDeltaTime;
             if (_snapshotTimer < SnapshotInterval) return;
@@ -83,7 +115,8 @@ namespace RL2Multiplayer
 
             try
             {
-                var w = new NetDataWriter();
+                var w = _snapWriter;
+                w.Reset();
                 w.Put((byte)MsgType.EnemyStateSnapshot);
 
                 var all = GetEnemies();
@@ -92,10 +125,12 @@ namespace RL2Multiplayer
                 for (int i = 0; i < all.Length; i++)
                 {
                     var e = all[i];
-                    if (e != null && !e.IsDead) count++;
+                    if (e == null || e.IsDead) continue;
+                    if (++count >= MaxSnapshotEnemies) break;
                 }
                 w.Put(count);
-                for (int i = 0; i < all.Length; i++)
+                int wrote = 0;
+                for (int i = 0; i < all.Length && wrote < count; i++)
                 {
                     var e = all[i];
                     if (e == null || e.IsDead) continue;
@@ -104,27 +139,49 @@ namespace RL2Multiplayer
                     float pct = maxHp > 0 ? Mathf.Clamp01(e.CurrentHealth / maxHp) : 1f;
                     w.Put(key);
                     w.Put(pct);
+                    wrote++;
                 }
 
                 // 第二遍：永久墓碑 key（v1.8.1：不再过期），让无论多晚进房的端都补杀。
-                // 先写数量再写 key（接收端按此顺序解析）；2048 仅防御畸形增长。
-                int tombCount = _tombstones.Count;
-                if (tombCount > 2048) tombCount = 2048;
-                w.Put(tombCount);
-                int written = 0;
-                foreach (var key in _tombstones)
+                // v2.0.6：改为**分片轮转**发送，每包最多 TombPerPacket 个。
+                // 之前把整份墓碑塞进一个 Sequenced 包，一局打下来墓碑能到几百个
+                // （8KB+），超过 MTU 会被 LiteNetLib 直接丢弃 —— 表现为"打着打着血量就不同步了"，
+                // 大包本身也会造成瞬时卡顿。轮转发送能保证所有墓碑最终都送到。
+                int tombTotal = _tombstones.Count;
+                _tombBuf.Clear();
+                if (tombTotal > 0)
                 {
-                    if (written >= tombCount) break;
-                    w.Put(key);
-                    written++;
+                    if (_tombSkip >= tombTotal) _tombSkip = 0;
+                    int seen = 0;
+                    foreach (var key in _tombstones)
+                    {
+                        if (seen++ < _tombSkip) continue;
+                        _tombBuf.Add(key);
+                        if (_tombBuf.Count >= TombPerPacket) break;
+                    }
+                    if (_tombBuf.Count < TombPerPacket && _tombSkip > 0)
+                    {
+                        // 绕回开头补齐（轮转）
+                        seen = 0;
+                        foreach (var key in _tombstones)
+                        {
+                            if (seen++ >= _tombSkip) break;
+                            _tombBuf.Add(key);
+                            if (_tombBuf.Count >= TombPerPacket) break;
+                        }
+                    }
+                    _tombSkip = (_tombSkip + _tombBuf.Count) % Math.Max(1, tombTotal);
                 }
+                w.Put(_tombBuf.Count);
+                for (int i = 0; i < _tombBuf.Count; i++) w.Put(_tombBuf[i]);
 
                 NetworkManager.Instance.SendEnemySnapshot(w);
 
                 if (Time.unscaledTime - _lastSnapLog > 5f)
                 {
                     _lastSnapLog = Time.unscaledTime;
-                    Plugin.Log.LogInfo("[RL2MP] [ENEMY] 广播血量快照 enemies=" + count + " tombstones=" + tombCount);
+                    Plugin.Log.LogInfo("[RL2MP] [ENEMY] 广播血量快照 enemies=" + count + " tombstones=" + _tombBuf.Count
+                        + "/" + _tombstones.Count);
                 }
             }
             catch (Exception ex)
@@ -260,6 +317,9 @@ namespace RL2Multiplayer
                 w.Put(nm.LocalPlayerId);   // 发送者：接收端据此跳过自己，主机据此中转
                 w.Put(key);
                 w.Put(dmg);
+                w.Put((int)enemy.EnemyType);
+                w.Put(enemy.transform.position.x);
+                w.Put(enemy.transform.position.y);
                 nm.SendEnemyDamage(w);
                 Plugin.Log.LogInfo("[RL2MP] [ENEMY] 转发伤害 key=" + key + " dmg=" + dmg.ToString("F1")
                     + " (" + enemy.EnemyType + "/" + enemy.EnemyRank + " idx=" + enemy.EnemyIndex + ")");
@@ -297,10 +357,11 @@ namespace RL2Multiplayer
         }
 
         /// <summary>收到对端转发的伤害：本地同一只怪扣血，必要时补死亡。</summary>
-        internal static void ApplyRemoteDamage(int key, float dmg)
+        internal static void ApplyRemoteDamage(int key, float dmg, int enemyType, float px, float py)
         {
             if (!Active || dmg <= 0f) return;
             EnemyController target = FindByKey(key);
+            if (target == null) target = FindCompatible(key, enemyType, px, py);
             if (target == null)
             {
                 if (Time.unscaledTime - _lastLogUnmatched > 3f)
@@ -340,30 +401,44 @@ namespace RL2Multiplayer
                 int key = BuildKey(__instance);
                 // v1.8.0：主机记下墓碑，随快照重发 8 秒，覆盖晚进房端的补杀窗口。
                 var nm = NetworkManager.Instance;
-                if (nm != null && nm.IsHost) _tombstones.Add(key);
+                if (nm != null && RoomAuthority.IsLocalAuthority) _tombstones.Add(key);
                 if (nm == null) return;
                 var w = new NetDataWriter();
                 w.Put((byte)MsgType.EnemyDied);
                 w.Put(nm.LocalPlayerId);
                 w.Put(key);
+                w.Put((int)__instance.EnemyType);
+                w.Put(__instance.transform.position.x);
+                w.Put(__instance.transform.position.y);
                 nm.SendEnemyDamage(w);
             }
             catch { }
         }
 
         /// <summary>对端怪已死：本地对应怪若还活着，补一次死亡。</summary>
-        internal static void ApplyRemoteDeath(int key)
+        internal static void ApplyRemoteDeath(int key, int enemyType, float px, float py)
         {
             if (!Active) return;
             EnemyController target = FindByKey(key);
+            if (target == null) target = FindCompatible(key, enemyType, px, py);
             if (target == null || target.IsDead) return;
             KillLocal(target, key, "同步对端击杀");
+        }
+
+        /// <summary>
+        /// v2.5.0：EnemyAliveSync 按权威存活集补杀——已经有确切的本地实例，不需要 key 反查。
+        /// 复用抑制标志保证不回传、墓碑只在主机记录。
+        /// </summary>
+        internal static void ApplyRemoteDeathHostAuthoritative(EnemyController target)
+        {
+            if (target == null || target.IsDead) return;
+            KillLocal(target, BuildKey(target), "权威存活集补杀");
         }
 
         private static void KillLocal(EnemyController target, int key, string reason)
         {
             var nm0 = NetworkManager.Instance;
-            if (nm0 != null && nm0.IsHost) _tombstones.Add(key);
+            if (nm0 != null && RoomAuthority.IsLocalAuthority) _tombstones.Add(key);
             _applyingRemote = true;
             try
             {
@@ -381,13 +456,16 @@ namespace RL2Multiplayer
             }
         }
 
-        private static int BuildKey(EnemyController e)
+        internal static int BuildKey(EnemyController e)
         {
+            if (e == null) return 0;
+            int cached;
+            if (_keyCache.TryGetValue(e, out cached)) return cached;
+
             unchecked
             {
                 int h = 17;
-                string scene = UnityEngine.SceneManagement.SceneManager.GetActiveScene().name;
-                h = h * 31 + (scene != null ? scene.GetHashCode() : 0);
+                h = h * 31 + SceneHash();
 
                 // v1.8.2：回退 v1.8.1 的房间坐标（Room.Coordinates）。实测两端用运行时
                 // 世界坐标 *10 取整算出的 key 不一致（日志：收到伤害 key=... 未找到对应怪），
@@ -397,6 +475,7 @@ namespace RL2Multiplayer
                 h = h * 31 + e.EnemyIndex;
                 h = h * 31 + (int)e.EnemyType;
                 h = h * 31 + (int)e.EnemyRank;
+                _keyCache[e] = h;
                 return h;
             }
         }
@@ -415,6 +494,43 @@ namespace RL2Multiplayer
             }
             catch { }
             return null;
+        }
+
+        /// <summary>
+        /// v2.2.0：key 对不上时的兜底匹配。
+        ///
+        /// key = 场景 + 刷怪序号 + 类型 + 等级。只要有一端房间没初始化完整
+        /// （客机进房时 PlacePlayerInRoom_End 中途抛异常就会这样），刷怪序号整体错位，
+        /// 于是伤害全部落空 —— 表现就是"我这边明明打中了，对方那边怪没掉血"。
+        /// 退一步：同类型、位置最近（6m 内）的活怪认作同一只。6m 既能容忍序号漂移，
+        /// 又不会误伤隔壁的同类怪。
+        /// </summary>
+        private static EnemyController FindCompatible(int key, int enemyType, float px, float py)
+        {
+            try
+            {
+                var all = GetEnemies();
+                Vector2 src = new Vector2(px, py);
+                EnemyController best = null;
+                float bestD = 36f;   // 6m^2
+                for (int i = 0; i < all.Length; i++)
+                {
+                    var e = all[i];
+                    if (e == null || e.IsDead) continue;
+                    if ((int)e.EnemyType != enemyType) continue;
+                    float d = ((Vector2)e.transform.position - src).sqrMagnitude;
+                    if (d < bestD) { bestD = d; best = e; }
+                }
+                if (best != null && Time.unscaledTime - _lastLogUnmatched > 3f)
+                {
+                    _lastLogUnmatched = Time.unscaledTime;
+                    Plugin.Log.LogInfo("[RL2MP] [ENEMY] key=" + key + " 未命中，按类型+位置兜底匹配到 "
+                        + best.EnemyType + " idx=" + best.EnemyIndex
+                        + " 距离 " + Mathf.Sqrt(bestD).ToString("F1") + "m");
+                }
+                return best;
+            }
+            catch { return null; }
         }
 
         internal static void ResetAll()

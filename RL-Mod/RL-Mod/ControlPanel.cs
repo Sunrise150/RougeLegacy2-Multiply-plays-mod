@@ -20,10 +20,6 @@ namespace RL2Multiplayer
         private float _heartbeatTimer;
         private int _heartbeatCount;
 
-        private float _guiLogTimer;
-        private int _guiCallCount;
-
-        private static GUIStyle _diagStyle;
         private static GUIStyle _errorStyle;
 
         private string _lastGuiError;
@@ -64,10 +60,29 @@ namespace RL2Multiplayer
 
             Race.Tick();
             Score.Tick();
+
+            // v1.9.2：处理联机中心关闭后的延迟 UI 复位（必须非 IMGUI 上下文）
+            MpHub.TickDeferred();
+
             if (Input.GetKeyDown(KeyCode.Keypad1) || Input.GetKeyDown(KeyCode.F7))
             {
-                _uiVisible = !_uiVisible;
-                Plugin.Log.LogInfo("[RL2MP] [KEY] UI toggled: " + _uiVisible);
+                // v1.9.0：改为开关整屏联机中心（原来是开关小弹窗）
+                MpHub.Toggle();
+                Plugin.Log.LogInfo("[RL2MP] [KEY] 联机中心切换 -> " + MpHub.Visible);
+            }
+            if (Input.GetKeyDown(KeyCode.Escape) && MpHub.Visible)
+            {
+                MpHub.Close();
+            }
+
+            // v1.9.4：聊天栏键盘（回车展开/发送、Esc 收起）。MpHub 打开时不响应。
+            if (!MpHub.Visible)
+            {
+                ChatPanel.HandleInput();
+            }
+            else if (ChatPanel.Expanded)
+            {
+                ChatPanel.Collapse();
             }
 
             if (Input.GetKeyDown(KeyCode.Keypad2))
@@ -115,40 +130,33 @@ namespace RL2Multiplayer
 
         private void OnGUI()
         {
-            _guiCallCount++;
-            _guiLogTimer += Time.unscaledDeltaTime;
-            if (_guiLogTimer >= 5f)
-            {
-                _guiLogTimer = 0f;
-                Plugin.Log.LogInfo("[RL2MP] [ONGUI] alive. callCount~" + _guiCallCount + " uiVisible=" + _uiVisible);
-            }
+            // v1.9.2：不再绘制旧的 IMGUI 诊断条和小控制面板（太丑）。
+            // 界面统一收敛到整屏联机中心 MpHub，由 F7 / 主菜单按钮 / ESC 暂停菜单 Tab 打开。
+            // 这里只保留 GUI 状态复位 + 转发绘制，热键与 Tick 仍在 Update 里正常运行。
 
-            // 游戏本体可能改过 GUI 的全局状态，这里强制复位，避免面板被画到屏幕外/透明
+            // 游戏本体可能改过 GUI 的全局状态，这里强制复位，避免联机中心被画到屏幕外/透明
             GUI.matrix = Matrix4x4.identity;
             GUI.color = Color.white;
             GUI.depth = 0;
 
+            // v1.9.4：聊天栏始终绘制（收起且无消息时完全不画，有消息时右下角缩略提示）
             try
             {
-                EnsureStyles();
-
-                // 诊断条：始终可见（先铺一个深色底，保证在任何画面上都能看清）
-                GUI.Box(new Rect(0, 0, Mathf.Min(Screen.width, 620f), 22f), "");
-                GUI.Label(new Rect(6, 3, 600, 20),
-                    "RL2MP v1.5.0 | UI:" + (_uiVisible ? "ON" : "OFF")
-                    + " | KP1/F7 toggle | NetMgr:" + (NetworkManager.Instance != null ? "ok" : "null")
-                    + (DownedState.LocalDown
-                        ? " | 倒地观战: [ / ] 切换 | F10 复活"
-                        : " | F9 测试倒地"),
-                    _diagStyle);
-
-                if (!_uiVisible) return;
-
-                _windowRect = GUILayout.Window(12345, _windowRect, DrawWindow, "RL2MP Control Panel", GUILayout.MinWidth(320));
+                ChatPanel.Draw();
             }
             catch (Exception ex)
             {
-                // 出错时把错误直接画在屏幕上，避免"面板什么都不显示、日志也看不出原因"
+                Plugin.Log.LogWarning("[RL2MP] [CHAT] 绘制异常: " + ex.Message);
+            }
+
+            if (!MpHub.Visible) return;
+
+            try
+            {
+                MpHub.Draw();
+            }
+            catch (Exception ex)
+            {
                 string msg = ex.GetType().Name + ": " + ex.Message;
                 if (msg != _lastGuiError)
                 {
@@ -160,22 +168,16 @@ namespace RL2Multiplayer
                 {
                     Plugin.Log.LogError("[RL2MP] [ONGUI] GUI error: " + msg + "\n" + ex.StackTrace);
                 }
-
-                float w = Mathf.Min(Screen.width - 8f, 1100f);
                 GUI.color = Color.white;
+                float w = Mathf.Min(Screen.width - 8f, 1100f);
                 GUI.Box(new Rect(2, 24, w, 46), "");
-                GUI.Label(new Rect(8, 28, w - 12, 40), "RL2MP GUI ERROR (" + _guiErrorCount + "x)\n" + msg, _errorStyle);
+                if (_errorStyle == null) EnsureStyles();
+                GUI.Label(new Rect(8, 28, w - 12, 40), "RL2MP 界面错误 (" + _guiErrorCount + "x)\n" + msg, _errorStyle);
             }
         }
 
         private static void EnsureStyles()
         {
-            if (_diagStyle == null)
-            {
-                _diagStyle = new GUIStyle(GUI.skin.label);
-                _diagStyle.fontSize = 14;
-                _diagStyle.normal.textColor = Color.yellow;
-            }
             if (_errorStyle == null)
             {
                 _errorStyle = new GUIStyle(GUI.skin.label);
@@ -331,7 +333,7 @@ namespace RL2Multiplayer
 
         // ---------------- 新周目说明 ----------------
 
-        private void DrawNewGameHint()
+        internal static void DrawNewGameHint()
         {
             var nm = NetworkManager.Instance;
             if (nm == null || !nm.Connected) return;
@@ -365,7 +367,7 @@ namespace RL2Multiplayer
             return changed;
         }
 
-        private void DrawRaceSection()
+        internal static void DrawRaceSection()
         {
             var nm = NetworkManager.Instance;
             bool netReady = nm != null && nm.Connected;
@@ -600,7 +602,7 @@ namespace RL2Multiplayer
         }
 
         /// <summary>大厅名单：每人 ready / 在不在游戏里 / 用时 / 得分。</summary>
-        private void DrawRosterTable(bool isHost)
+        internal static void DrawRosterTable(bool isHost)
         {
             GUILayout.Space(4);
             if (Roster.Count == 0)
@@ -631,7 +633,7 @@ namespace RL2Multiplayer
                 + "   你: " + (Race.LocalReady ? "✔" : "…"));
         }
 
-        private string GetStatusText()
+        internal static string GetStatusText()
         {
             if (NetworkManager.LastError != null)
                 return "网络错误: " + NetworkManager.LastError;

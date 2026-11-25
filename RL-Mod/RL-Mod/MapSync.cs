@@ -285,6 +285,10 @@ namespace RL2Multiplayer
         private static void ResetRuntimeState(StageSaveData stage)
         {
             int rooms = 0, enemies = 0, chests = 0, breakables = 0;
+            // v3.0.23：协作模式启用"共享世界状态"（WorldStateSync）——一次性易碎品/治疗树
+            // 必须跟主机一致，所以【不能】把这些标记重置成"全新"。竞速模式仍各打各的，
+            // 保持原有重置行为。
+            bool shareWorld = Score.Style == PlayStyle.CoOp;
             try
             {
                 if (stage == null || stage.RoomSaveDataDict == null) return;
@@ -299,9 +303,10 @@ namespace RL2Multiplayer
                         var rd = list[i];
                         if (rd == null) continue;
 
-                        // 保留 RoomVisited（主机的探索记录，客机小地图能直接看到路线，竞速更好用），
-                        // 但房间完成度要归零：客机必须自己清房/打 Boss。
-                        rd.IsRoomComplete = false;
+                        // 保留 RoomVisited（主机的探索记录，客机小地图能直接看到路线，竞速更好用）。
+                        // v3.0.23：协作共享世界里 IsRoomComplete 代表治疗树等特殊设施是否已用，
+                        // 必须与主机一致，不重置；竞速仍归零（各打各的）。
+                        if (!shareWorld) rd.IsRoomComplete = false;
 
                         if (rd.EnemyStates != null)
                         {
@@ -326,14 +331,14 @@ namespace RL2Multiplayer
                             }
                         }
 
+                        // v3.0.23：协作下易碎品是一次性世界状态，沿用主机地图里的值（已破的保持已破）。
                         if (rd.BreakableStates != null)
                         {
                             for (int k = 0; k < rd.BreakableStates.Length; k++)
                             {
                                 var st = rd.BreakableStates[k];
                                 if (st == null) continue;
-                                st.IsStateActive = true;
-                                st.AttackerIsOnRight = false;
+                                if (!shareWorld) { st.IsStateActive = true; st.AttackerIsOnRight = false; }
                                 breakables++;
                             }
                         }
@@ -344,8 +349,7 @@ namespace RL2Multiplayer
                             {
                                 var st = rd.DecoBreakableStates[k];
                                 if (st == null) continue;
-                                st.IsStateActive = true;
-                                st.AttackerIsOnRight = false;
+                                if (!shareWorld) { st.IsStateActive = true; st.AttackerIsOnRight = false; }
                             }
                         }
 
@@ -405,7 +409,10 @@ namespace RL2Multiplayer
                 }
 
                 Plugin.Log.LogInfo("[RL2MP] [MAP] 重进 World（用主机地图数据）...");
-                SceneLoader_RL.LoadScene(SceneID.World, TransitionID.FadeToBlackWithLoading);
+                // v2.0.2：内部重进不广播，否则客机重进->主机跟随->回传，场景来回切导致一直加载
+                SceneChangeSync.SuppressBroadcast = true;
+                try { SceneLoader_RL.LoadScene(SceneID.World, TransitionID.FadeToBlackWithLoading); }
+                finally { SceneChangeSync.SuppressBroadcast = false; }
             }
             catch (Exception ex)
             {

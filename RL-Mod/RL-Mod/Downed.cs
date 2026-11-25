@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using HarmonyLib;
+using SceneManagement_RL;
 using UnityEngine;
 using UnityEngine.SceneManagement;
 
@@ -22,6 +23,19 @@ namespace RL2Multiplayer
         /// <summary>正在观战的目标玩家 ID，-1 表示还没选。</summary>
         internal static int SpectateTargetId = -1;
 
+        /// <summary>
+        /// v3.0.4：权威易手后强制重新解析/激活观战房间。
+        /// 换房包驱动的 RemoteRoomCoords 在权威切换瞬间可能还是旧的，
+        /// 需要让观战维护下一拍强制重查一次，避免房间坐标锁死在易手前的值。
+        /// </summary>
+        internal static bool ForceSpectateRoomRefresh;
+
+        /// <summary>
+        /// v3.0.22：稳定的 MonoBehaviour 宿主（Plugin 创建的 DownedManager），
+        /// 供需要跑协程的模块使用（例如跨区域时在本地补建房间）。
+        /// </summary>
+        internal static MonoBehaviour HostBehaviour;
+
         /// <summary>倒地瞬间的位置，用于复活时把人放回原地。</summary>
         internal static Vector3 LastAlivePos;
 
@@ -39,17 +53,32 @@ namespace RL2Multiplayer
 
         private static CinemachineVirtualCameraManager _vcam;
         private static Transform _lastFollow;
-        private static float _refollowTimer;
         private static float _logTimer;
         private static float _stuckTimer;
         private static float _aggroClearTimer;
         private static float _roomCheckTimer;
         private static BaseRoom _spectatedRoom;
+        // v3.0.16：刚离开的观战房间 + 黏滞截止时刻。真机日志显示观战会在
+        // '15*Standard*'<->'5*Standard*' 之间反复横跳，每次都关房 → 存活方所在房
+        // 反复被 SetActive(false)。切走后 1.5s 内不再切回旧房，掐断摇摆。
+        private static BaseRoom _spectateJustLeft;
+        private static float _spectateStickyUntil;
+        // v3.0.16：观战跳过关房日志的限流计时（独立于 _logTimer 的相机诊断日志）
+        private static float _skipCloseLogTime;
+        // v3.0.22：观战端跨区域补建房间的日志节流
+        private static float _biomeBuildLogTime;
+        // v3.0.19：观战换房滞回。相邻房的 Room.Bounds（含 10m letterbox）互相重叠，
+        // 单拍“包含目标”会让观战在两房之间高频横跳；必须连续两拍确认才换。
+        private static BaseRoom _spectateSwitchCandidate;
+        private static int _spectateSwitchVotes;
         /// <summary>复活后仇恨压制窗截止时刻（unscaled）：窗内每 0.5s 再清一次索敌。</summary>
         private static float _aggroSuppressionUntil;
         private static float _aggroFailLogTime;
         /// <summary>倒地观战期间冻结角色物理的计时（防坠落速度累积）。</summary>
         private static float _freezeTimer;
+        /// <summary>v2.4.1：真实死亡触发尝试次数与下次重试时刻（失败不再直接放弃）。</summary>
+        private static int _realDeathAttempts;
+        private static float _realDeathRetryAt;
         /// <summary>复活后临时打开 DisableDoorBlock 的截止时刻：门判定原本会因
         /// MovementDisabled/Stunned 把玩家钳回门口，复活瞬间状态可能还没干净。</summary>
         private static float _doorBlockUntil;
@@ -57,6 +86,94 @@ namespace RL2Multiplayer
         // 我们绕过了它，所以退出观战时要自己把这些房间关回去，否则里面的
         // 怪会一直活着跨房间追人 —— 这正是"下个房间的怪跑到上个房间打我"的来源）
         private static readonly List<BaseRoom> _activatedRooms = new List<BaseRoom>();
+        // v2.8.7：已完成观战初始化的房间（含原生已激活的），避免同一个房间反复刷怪/建背景。
+        private static readonly HashSet<BaseRoom> _spectateInitRooms = new HashSet<BaseRoom>();
+
+        // v3.0.11：观战房初始化/相机的反射缓存。
+        // 关键修复：PlacePlayerInRoom_Start/_End、InitializeSpawnControllerInstances、
+        // InitializeBackgrounds、BroadcastPlayerEnterRoomEvents 都是【BaseRoom 的私有实例方法】，
+        // 旧版用 room.GetType()（=Room/MergeRoom 派生类）去取——Harmony AccessTools.Method
+        // 默认不向上找基类私有方法，反射恒为 null，于是怪/背景/进入事件全没初始化 → 黑房。
+        // 显式用 typeof(BaseRoom) 取，一次缓存复用。
+        // v3.0.21：设施补刷的反射缓存。InitializeSpawnControllerInstances
+        // 会把敌人的 EnemyInstance 一起重新借出并把 Target 指回本地尸体（主机倒地观战时
+        // 就是 inactive 的尸体），导致"怪不打存活方"。所以设施补刷只碰
+        // PropSpawnController / ChestSpawnController。这两个 Init 是 public，
+        // 但用反射调用可避免直接依赖原生类型签名，和本项目其它补丁风格一致。
+        private static MethodInfo _propInitInstance;
+        private static MethodInfo _chestInitInstance;
+        private static MethodInfo _roomStartInit;
+        private static MethodInfo _roomSpawnInit;
+        private static MethodInfo _roomBgInit;
+        private static MethodInfo _roomBroadcastEnter;
+        private static PropertyInfo _roomCinemachineProp;
+        private static FieldInfo _roomEventArgsField;
+        private static MethodInfo _vcamSetActive;
+        private static PropertyInfo _roomVcamProp;
+        private static MethodInfo _vcamInternalUpdate;
+        private static MethodInfo _brainManualUpdate;
+
+        private static void EnsureRoomReflection()
+        {
+            if (_roomStartInit != null) return;
+            _roomStartInit = AccessTools.Method(typeof(BaseRoom), "PlacePlayerInRoom_Start");
+            _roomSpawnInit = AccessTools.Method(typeof(BaseRoom), "InitializeSpawnControllerInstances");
+            _roomBgInit = AccessTools.Method(typeof(BaseRoom), "InitializeBackgrounds");
+            _roomBroadcastEnter = AccessTools.Method(typeof(BaseRoom), "BroadcastPlayerEnterRoomEvents");
+            _roomCinemachineProp = AccessTools.Property(typeof(BaseRoom), "CinemachineCamera");
+            _roomEventArgsField = AccessTools.Field(typeof(BaseRoom), "m_roomViaDoorEventArgs");
+
+            // v3.0.21：设施专用反射（不碰敌人）
+            _propInitInstance = AccessTools.Method(typeof(PropSpawnController), "InitializePropInstance");
+            _chestInitInstance = AccessTools.Method(typeof(ChestSpawnController), "InitializeChestInstance");
+        }
+
+        /// <summary>
+        /// v3.0.21：只重新借出/初始化房间的 Prop（天赋·武器切换点、治疗树）和 Chest，
+        /// 刻意跳过 EnemySpawnController —— 后者的 InitializeEnemyInstance 会把怪物的
+        /// Target 重置成 PlayerManager.GetPlayer()（观战端就是 inactive 的本地尸体），
+        /// 直接把"怪打存活方"又改坏。原生 InitializeSpawnControllerInstances 是三者一起做，
+        /// 这里按类型拆开，做到"补设施不碰怪"。
+        /// </summary>
+        private static int EnsureRoomProps(BaseRoom room)
+        {
+            int count = 0;
+            if (room == null) return 0;
+            try
+            {
+                EnsureRoomReflection();
+                var mgr = room.SpawnControllerManager;   // 强类型，和 RoomFix.CountMissingEnemies 一致
+                if (mgr == null) return 0;
+
+                var props = mgr.PropSpawnControllers;
+                if (props != null && _propInitInstance != null)
+                {
+                    for (int i = 0; i < props.Length; i++)
+                    {
+                        var sc = props[i];
+                        if (sc == null) continue;
+                        try { _propInitInstance.Invoke(sc, null); count++; }
+                        catch { /* 单个道具失败不影响其它 */ }
+                    }
+                }
+                var chests = mgr.ChestSpawnControllers;
+                if (chests != null && _chestInitInstance != null)
+                {
+                    for (int i = 0; i < chests.Length; i++)
+                    {
+                        var sc = chests[i];
+                        if (sc == null) continue;
+                        try { _chestInitInstance.Invoke(sc, null); count++; }
+                        catch { }
+                    }
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 补刷房间设施失败: " + ex.Message);
+            }
+            return count;
+        }
 
         internal static bool InSession
         {
@@ -126,17 +243,280 @@ namespace RL2Multiplayer
             }
         }
 
-        /// <summary>游戏切房间时会把镜头 Follow 改回玩家，这里定期纠一次，不打日志。</summary>
-        private static void FollowSilent(Transform target)
+        /// <summary>
+        /// v2.8.3：把"当前活动的虚拟相机"的 Follow 指向观战目标。
+        /// 每个房间有专属 vcam（含自己的 confiner/lens）；换房时游戏激活新房间的 vcam，
+        /// 并把它的 Follow 设回本地玩家（已隐藏的尸体）。缓存的 _vcam 指向旧房间，改它无效
+        /// ——这正是"半屏/失真/黑屏"的成因。rl2-coop 的做法是每帧重设活动相机，照搬。
+        /// 全程反射，不静态引用 Cinemachine.dll（v2.5.0 type load 教训）。
+        /// </summary>
+        private static PropertyInfo _brainProp;
+        private static PropertyInfo _activeVcamProp;
+        private static PropertyInfo _vcamFollowProp;
+
+        private static void FollowActiveVcam(Transform target)
         {
-            if (target == null || !EnsureVcam()) return;
+            if (target == null) return;
             try
             {
-                _vcam.SetFollowTarget(target);
+                if (_brainProp == null)
+                    _brainProp = AccessTools.Property(typeof(CameraController), "CinemachineBrain");
+                if (_brainProp == null) return;
+                object brain = _brainProp.GetValue(null, null);
+                if (brain == null) return;
+
+                Type brainType = brain.GetType();
+                if (_activeVcamProp == null || _activeVcamProp.DeclaringType != brainType)
+                    _activeVcamProp = AccessTools.Property(brainType, "ActiveVirtualCamera");
+                if (_activeVcamProp == null) return;
+                object vcam = _activeVcamProp.GetValue(brain, null);
+                if (vcam == null) return;
+
+                Type vcamType = vcam.GetType();
+                if (_vcamFollowProp == null || !_vcamFollowProp.DeclaringType.IsAssignableFrom(vcamType))
+                    _vcamFollowProp = AccessTools.Property(vcamType, "Follow");
+                if (_vcamFollowProp == null) return;
+
+                object current = _vcamFollowProp.GetValue(vcam, null);
+                if (!ReferenceEquals(current, target))
+                    _vcamFollowProp.SetValue(vcam, target, null);
             }
-            catch (Exception)
+            catch { /* 相机切换中：下一帧再纠 */ }
+        }
+
+        /// <summary>游戏切房间时会把镜头 Follow 改回玩家，这里每帧纠一次，不打日志。</summary>
+        private static float _nextCamDiagAt;
+        private static void FollowSilent(Transform target)
+        {
+            if (target == null) return;
+            FollowActiveVcam(target);
+            // v3.0.14：每 3 秒打一次观战相机诊断（只观测，绝不修改任何相机/房间状态）。
+            // 只在观战期间走到这里，所以日志干净、不污染正常游戏。
+            if (Time.unscaledTime >= _nextCamDiagAt)
             {
-                // 忽略：相机可能在切换中
+                _nextCamDiagAt = Time.unscaledTime + 3f;
+                DumpSpectateDiagnostics(_spectatedRoom, target);
+            }
+        }
+
+        /// <summary>
+        /// v3.0.14：观战半黑屏诊断日志。用户提了五个 Unity 相机排查方向
+        /// （Culling Mask / Clear Flags / Depth / Viewport Rect / Camera Stacking）——
+        /// 反编译确认 RL2 是 Built-in 管线，第五项不适用；观战全程复用房间原生 vcam，
+        /// mod 从未新建相机或改过这些属性。所以这里打印 brain 实际输出相机的真值供核对，
+        /// 并补三个反编译锁定的真凶候选：confiner IsValid、活动 vcam 归属房间、letterbox 黑块。
+        /// 全部反射 + 分级 try/catch，任何一个字段取不到都不影响观战主流程。
+        /// </summary>
+        private static void DumpSpectateDiagnostics(BaseRoom room, Transform target)
+        {
+            var log = new System.Text.StringBuilder("[RL2MP] [CamDiag]");
+            try
+            {
+                log.Append(" room=").Append(room != null ? room.name : "<null>");
+                log.Append(" target=").Append(target != null ? target.name : "<null>");
+
+                // 1) Brain 实际输出相机：用户提的 Culling Mask / Clear Flags / Depth / Viewport Rect 真值
+                try
+                {
+                    Camera outCam = GetBrainOutputCamera();
+                    if (outCam != null)
+                        log.Append(" | cam=").Append(outCam.name)
+                           .Append(" cull=").Append(outCam.cullingMask)
+                           .Append(" clear=").Append(outCam.clearFlags)
+                           .Append(" depth=").Append(outCam.depth.ToString("F2"))
+                           .Append(" rect=").Append(outCam.rect)
+                           .Append(" ortho=").Append(outCam.orthographic)
+                           .Append(" size=").Append(outCam.orthographicSize.ToString("F2"));
+                    else
+                        log.Append(" | outCam=<null>");
+                }
+                catch (Exception e) { log.Append(" | camErr=").Append(e.Message); }
+
+                // 2) 活动 vcam 是谁的、Follow 指向谁（真凶候选：活动 vcam 不是观战房的）
+                try
+                {
+                    object activeVcam = GetActiveVirtualCamera();
+                    if (activeVcam != null)
+                    {
+                        var comp = activeVcam as UnityEngine.Component;
+                        if (comp != null)
+                        {
+                            log.Append(" | vcam=").Append(comp.gameObject.name);
+                            BaseRoom owner = null;
+                            try { owner = comp.GetComponentInParent<BaseRoom>(); } catch { }
+                            log.Append(" owner=").Append(owner != null ? owner.name : "<none>");
+                        }
+                        else log.Append(" | vcam=").Append(activeVcam.GetType().Name);
+
+                        var followProp = AccessTools.Property(activeVcam.GetType(), "Follow");
+                        object follow = followProp != null ? followProp.GetValue(activeVcam, null) : null;
+                        log.Append(" follow=").Append(follow != null ? follow.ToString() : "<null>");
+                    }
+                    else log.Append(" | vcam=<null>");
+                }
+                catch (Exception e) { log.Append(" | vcamErr=").Append(e.Message); }
+
+                // 3) 活动 vcam 的 confiner：IsValid / boundingShape active / bounds（头号真凶）
+                try
+                {
+                    object activeVcam = GetActiveVirtualCamera();
+                    var comp = activeVcam as UnityEngine.Component;
+                    UnityEngine.Component confiner = comp != null
+                        ? comp.GetComponent("CinemachineConfiner_RL") : null;
+                    if (confiner != null)
+                    {
+                        var validProp = AccessTools.Property(confiner.GetType(), "IsValid");
+                        bool valid = validProp != null && (bool)validProp.GetValue(confiner, null);
+                        var shapeField = AccessTools.Field(confiner.GetType(), "m_BoundingShape2D");
+                        var shape = shapeField != null ? shapeField.GetValue(confiner) as Collider2D : null;
+                        bool shapeActive = shape != null && shape.gameObject.activeInHierarchy;
+                        string bounds = shape != null
+                            ? shape.bounds.size.x.ToString("F1") + "x" + shape.bounds.size.y.ToString("F1")
+                            : "<null>";
+                        log.Append(" | confiner valid=").Append(valid)
+                           .Append(" shapeActive=").Append(shapeActive)
+                           .Append(" bounds=").Append(bounds);
+                    }
+                    else log.Append(" | confiner=<none>");
+                }
+                catch (Exception e) { log.Append(" | confErr=").Append(e.Message); }
+
+                // 4) 同时 active 的房间数（多房并存 → confiner 在错边界间摇摆）
+                try
+                {
+                    var all = Resources.FindObjectsOfTypeAll<BaseRoom>();
+                    int active = 0;
+                    string names = "";
+                    for (int i = 0; i < all.Length; i++)
+                    {
+                        var r = all[i];
+                        if (r == null || !r.gameObject.scene.IsValid()) continue;
+                        if (!r.gameObject.activeInHierarchy) continue;
+                        active++;
+                        if (names.Length < 140) names += r.name + ",";
+                    }
+                    log.Append(" | activeRooms=").Append(active).Append(" [").Append(names).Append("]");
+                }
+                catch (Exception e) { log.Append(" | roomCntErr=").Append(e.Message); }
+
+                // 5) RoomLetterbox 黑块：由我们广播的 PlayerEnterRoom 触发，异常房间会生成遮挡块（看似半黑）
+                try
+                {
+                    if (room != null)
+                    {
+                        int blocks = 0;
+                        string detail = "";
+                        var t = room.gameObject.transform;
+                        for (int i = 0; i < t.childCount; i++)
+                        {
+                            var c = t.GetChild(i);
+                            if (!c.gameObject.activeSelf) continue;
+                            int layer = c.gameObject.layer;
+                            if (layer != 5 && layer != 23) continue;   // RoomLetterboxController 固定用 5/23
+                            blocks++;
+                            if (detail.Length < 180)
+                                detail += c.gameObject.name + "@" + c.position + " s=" + c.localScale + ";";
+                        }
+                        log.Append(" | letterbox=").Append(blocks).Append(" [").Append(detail).Append("]");
+                    }
+                }
+                catch (Exception e) { log.Append(" | letterboxErr=").Append(e.Message); }
+            }
+            catch (Exception ex)
+            {
+                log.Append(" | DIAG_ERR=").Append(ex.Message);
+            }
+            Plugin.Log.LogInfo(log.ToString());
+        }
+
+        private static Camera GetBrainOutputCamera()
+        {
+            if (_brainProp == null)
+                _brainProp = AccessTools.Property(typeof(CameraController), "CinemachineBrain");
+            object brain = _brainProp != null ? _brainProp.GetValue(null, null) : null;
+            if (brain == null) return null;
+            try
+            {
+                var prop = AccessTools.Property(brain.GetType(), "OutputCamera");
+                if (prop != null)
+                {
+                    Camera c = prop.GetValue(brain, null) as Camera;
+                    if (c != null) return c;
+                }
+            }
+            catch { }
+            // 兜底：CinemachineBrain 通常就挂在实际输出相机上，直接取其 Camera 组件
+            try
+            {
+                var comp = brain as UnityEngine.Component;
+                if (comp != null) return comp.GetComponent<Camera>();
+            }
+            catch { }
+            return null;
+        }
+
+        private static object GetActiveVirtualCamera()
+        {
+            if (_brainProp == null)
+                _brainProp = AccessTools.Property(typeof(CameraController), "CinemachineBrain");
+            object brain = _brainProp != null ? _brainProp.GetValue(null, null) : null;
+            if (brain == null) return null;
+            if (_activeVcamProp == null || _activeVcamProp.DeclaringType != brain.GetType())
+                _activeVcamProp = AccessTools.Property(brain.GetType(), "ActiveVirtualCamera");
+            return _activeVcamProp != null ? _activeVcamProp.GetValue(brain, null) : null;
+        }
+
+        /// <summary>
+        /// v3.0.11：把指定房间的虚拟相机提升为 CinemachineBrain 的活动相机。
+        /// 根因：每个房间有自己的 vcam，confiner 绑在房间根 Collider2D 上；
+        /// CinemachineConfiner_RL.IsValid 要求 bounding shape activeInHierarchy。
+        /// 旧房被 SetActive(false) 后若 Brain 还激活着它的 vcam，confiner 直接失效
+        /// → 相机无边界 → 黑边/半屏/全黑。仅改 Follow 不够，必须把目标房 vcam 提到顶部。
+        /// 全程反射，不静态引用 Cinemachine.dll。
+        /// </summary>
+        private static void PromoteSpectateCamera(BaseRoom room)
+        {
+            if (room == null) return;
+            try
+            {
+                EnsureRoomReflection();
+                if (_roomCinemachineProp == null) return;
+                object mgr = _roomCinemachineProp.GetValue(room, null);
+                if (mgr == null) return;
+                Type mgrType = mgr.GetType();
+                if (_vcamSetActive == null || _vcamSetActive.DeclaringType != mgrType)
+                    _vcamSetActive = AccessTools.Method(mgrType, "SetIsActiveCamera");
+                if (_vcamSetActive == null) return;
+                _vcamSetActive.Invoke(mgr, new object[] { true });
+
+                // 立即刷新相机状态，避免等到下一帧 Brain 切换时的黑屏窗口
+                if (_roomVcamProp == null || _roomVcamProp.DeclaringType != mgrType)
+                    _roomVcamProp = AccessTools.Property(mgrType, "VirtualCamera");
+                if (_roomVcamProp != null)
+                {
+                    object vcam = _roomVcamProp.GetValue(mgr, null);
+                    if (vcam != null)
+                    {
+                        if (_vcamInternalUpdate == null || _vcamInternalUpdate.DeclaringType != vcam.GetType())
+                            _vcamInternalUpdate = AccessTools.Method(vcam.GetType(), "InternalUpdateCameraState");
+                        if (_vcamInternalUpdate != null)
+                            _vcamInternalUpdate.Invoke(vcam, new object[] { Vector3.up, 1f });
+                    }
+                }
+                // Brain 手动刷新一次（原生 OnPlayerEnterRoom 同款）
+                if (_brainProp == null)
+                    _brainProp = AccessTools.Property(typeof(CameraController), "CinemachineBrain");
+                object brain = _brainProp != null ? _brainProp.GetValue(null, null) : null;
+                if (brain != null)
+                {
+                    if (_brainManualUpdate == null || _brainManualUpdate.DeclaringType != brain.GetType())
+                        _brainManualUpdate = AccessTools.Method(brain.GetType(), "ManualUpdate");
+                    if (_brainManualUpdate != null) _brainManualUpdate.Invoke(brain, null);
+                }
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战相机提升失败: " + ex.Message);
             }
         }
 
@@ -341,6 +721,13 @@ namespace RL2Multiplayer
 
         // ---------------- 观战房间激活 ----------------
 
+        internal static void ClearSpectateRoomSelection()
+        {
+            _spectatedRoom = null;
+            _spectateSwitchCandidate = null;
+            _spectateSwitchVotes = 0;
+        }
+
         /// <summary>
         /// RL2 的 World 场景里同一时刻只有一个房间 GameObject 是激活的
         /// （PlayerExit 会把旧房间 SetActive(false)）。主机走进下一个房间后，
@@ -348,39 +735,402 @@ namespace RL2Multiplayer
         /// 这里把观战目标所在的房间在客机端激活 + 初始化（敌人/道具/背景/存档状态），
         /// 并让相机边界切过去 —— 等价于游戏的 PlacePlayerInRoom，但不挪动本地玩家。
         /// </summary>
-        private static void EnsureSpectateRoom(Vector3 targetPos)
+        private static void EnsureSpectateRoom(Vector3 targetPos, Vector2? hostGridCoords = null,
+            Vector2? hostAnchor = null, BaseRoom targetRoom = null)
         {
             try
             {
-                var room = FindRoomContaining(targetPos);
-                if (room == null) return;
-                if (_spectatedRoom == room) return;
-                _spectatedRoom = room;
+                // v3.0.18：权威换房包给出的房间是“存活方真正所在房间”的直接证据，
+                // 优先级高于按坐标猜房。真机日志里 '14*Standard*'<->'9*Standard*' 横跳，
+                // 而权威坐标始终是 (160,-18)=14*Standard*，正是坐标猜测选错的房。
+                // 过渡房 (*Transition*) 全程排除。
+                BaseRoom anchorRoom = hostAnchor.HasValue
+                    ? RoomTravelSync.FindRoomByAnchor(hostAnchor.Value.x, hostAnchor.Value.y) : null;
+                if (IsTransitionRoom(anchorRoom)) anchorRoom = null;
+                BaseRoom gridRoom = hostGridCoords.HasValue
+                    ? FindRoomByGridCoords(hostGridCoords.Value) : null;
+                if (IsTransitionRoom(gridRoom)) gridRoom = null;
+                BaseRoom authRoom = anchorRoom ?? gridRoom;
 
-                if (!room.gameObject.activeSelf)
+                // v3.0.22：跨区域（biome）时本地根本没有权威端所在区域的房间对象 ——
+                // 原生 BiomeTransitionController 只在"本地玩家实际过门"的一端实例化新区域，
+                // 倒地观战端从没过那扇门 → 选房必然落空（真机日志 "目标(96,-180)未匹配：
+                // 场景内有效房间=46 个"）→ 观战视角卡在初始地图。
+                // 这里在本地把权威端所在区域的房间补建出来（原生 InstantiateBiome），
+                // 补建完由下面的既有选房逻辑接管。
+                if (authRoom == null && gridRoom == null)
                 {
-                    // 复刻 PlacePlayerInRoom_End 的顺序：种子 -> 激活 -> 敌人/道具 -> 背景
-                    try
+                    int remoteBiome = RoomTravelSync.RemoteBiome;
+                    int localBiome = RoomTravelSync.CurrentLocalBiome();
+                    if (remoteBiome >= 0 && remoteBiome != localBiome)
                     {
-                        var seedMethod = AccessTools.Method(room.GetType(), "GetSpecialPropSeed");
-                        if (seedMethod != null)
-                            RNGManager.SetSeed(RngID.SpecialProps_RoomSeed, (int)seedMethod.Invoke(room, null));
+                        // 触发补建（内部有节流与去重，不会每帧重复跑协程）。
+                        if (BiomeRoomBuilder.EnsureBiome(remoteBiome))
+                        {
+                            // 补建是异步的（原生协程），这一拍先按现有逻辑选房，
+                            // 下一拍房间对象就位了，选房自然命中。
+                            if (Time.unscaledTime - _biomeBuildLogTime > 3f)
+                            {
+                                _biomeBuildLogTime = Time.unscaledTime;
+                                Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战端跨区域：已触发本地补建区域 "
+                                    + ((BiomeType)remoteBiome) + " 的房间");
+                            }
+                        }
                     }
-                    catch { /* 种子只是道具随机，失败无碍 */ }
-
-                    room.gameObject.SetActive(true);
-                    _activatedRooms.Add(room);
-
-                    AccessTools.Method(room.GetType(), "InitializeSpawnControllerInstances")?.Invoke(room, null);
-                    AccessTools.Method(room.GetType(), "InitializeBackgrounds")?.Invoke(room, null);
-                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战房间已激活: '" + room.name + "'");
                 }
 
-                // 按客机地图的房间状态加载（主机打死的敌人不会复活，开过的箱子保持开过）
-                if (room.SaveController != null) room.SaveController.OnPlayerEnter_LoadStageData();
+                // v3.0.19：判“包含目标”必须用房间【可玩区】（confiner/letterbox 内），
+                // 不能用 Room.Bounds —— 后者把四周 10m letterbox 也算进去，相邻房会
+                // 同时“包含”分身。真机日志 4*Mandatory*<->3*Standard* 每 1~2 秒横跳，
+                // 正是 v3.0.18 的 authContainsTarget 拿宽 Bound 判包含后绕过了防横跳守卫。
+                bool authContainsTarget = PlayableContains(authRoom, targetPos);
+                bool currentContainsTarget = PlayableContains(_spectatedRoom, targetPos);
 
-                // 相机边界切到该房间（否则 confiner 还锁在本地玩家房间）
-                CameraController.UpdateRoomCameraSettings(new RoomViaDoorEventArgs(room, null));
+                // 权威房确实包着目标 -> 直接用它；否则退回分身坐标反查（合并房里更贴合）。
+                var room = (targetRoom != null && !IsTransitionRoom(targetRoom) ? targetRoom : null)
+                           ?? (authContainsTarget ? authRoom : null)
+                           ?? FindRoomContaining(targetPos)
+                           ?? anchorRoom
+                           ?? gridRoom;
+                if (room == null) return;
+
+                // v3.0.18/19：目标仍在当前观战房可玩区内就钉住当前房。合并房与成员房
+                // Bounds 重叠，FindRoomContaining 按"面积最小"选时会在相邻房之间反复切换，
+                // 每次换房都关掉上一间，房间里的 Prop（补给/装备切换点、箱子、商店）
+                // 随对象池归还后再也不补 —— 表现就是"客机看得见，主机观战空白"。
+                if (_spectatedRoom != null && !ReferenceEquals(room, _spectatedRoom))
+                {
+                    if (currentContainsTarget)
+                    {
+                        room = _spectatedRoom;
+                        _spectateSwitchCandidate = null;
+                        _spectateSwitchVotes = 0;
+                    }
+                    else
+                    {
+                        // v3.0.19：借鉴 RevivalSync 的边沿/有界去重——连续两拍（约 1 秒）
+                        // 都指向同一个新房才换，挡住权威坐标与分身插值抖动。
+                        if (!ReferenceEquals(room, _spectateSwitchCandidate))
+                        {
+                            _spectateSwitchCandidate = room;
+                            _spectateSwitchVotes = 1;
+                        }
+                        else _spectateSwitchVotes++;
+                        if (_spectateSwitchVotes < 2) room = _spectatedRoom;
+                    }
+                }
+                else
+                {
+                    _spectateSwitchCandidate = null;
+                    _spectateSwitchVotes = 0;
+                }
+
+                // v3.0.16：黏滞窗内不切回刚离开的房间，止住两房横跳反复开关房。
+                // 只在"目标分身仍在当前房内"时生效——分身真进了新房则必须立刻跟上，
+                // 不能因为黏滞把镜头锁在旧房。
+                if (_spectatedRoom != null && !ReferenceEquals(room, _spectatedRoom)
+                    && ReferenceEquals(room, _spectateJustLeft)
+                    && Time.unscaledTime < _spectateStickyUntil)
+                {
+                    bool targetInCur = false;
+                    try { targetInCur = _spectatedRoom.Bounds.Contains(targetPos); } catch { }
+                    if (targetInCur) room = _spectatedRoom;
+                }
+
+                bool roomChanged = (_spectatedRoom != room);
+                if (roomChanged)
+                {
+                    BaseRoom previous = _spectatedRoom;
+                    _spectatedRoom = room;
+                    _spectateSwitchCandidate = null;
+                    _spectateSwitchVotes = 0;
+                    // 记下刚离开的房，1.5s 内不切回（防止横跳）。
+                    if (previous != null)
+                    {
+                        _spectateJustLeft = previous;
+                        _spectateStickyUntil = Time.unscaledTime + 1.5f;
+                    }
+
+                    // v3.0.10：切换观战房间时，把我们上一间手动激活的房间关回去。
+                    // 旧版只在退出观战(RestoreSpectateRooms)时统一关，观战期间跨房间
+                    // 一路累积 active（真机日志：8*Standard*→5*Mandatory*→4*Standard*
+                    // →29*Mandatory* 四个房间同时开着）。RL2 同一时刻只该有一个房间 active，
+                    // 多房并存让相机 confiner 在错边界间摇摆 -> 黑屏/半屏/房间看着不对。
+                    // 只关"我们自己激活且没被本地玩家占用"的旧房，绝不碰官方激活的房间。
+                    if (previous != null && !ReferenceEquals(previous, room)
+                        && _activatedRooms.Contains(previous))
+                    {
+                        BaseRoom localRoom = null;
+                        var psc = PS != null ? PS.LocalPlayer as PlayerController : null;
+                        try { if (psc != null) localRoom = psc.CurrentlyInRoom; } catch { }
+
+                        // v3.0.16（真机铁证）：倒地端观战选房会在相邻房之间摇摆
+                        //（主机日志“关闭上一房间 X”紧跟客机日志“掉出房间 X”：
+                        // 5*/11*/9*/20*Standard* 四间逐一对应）。根因是这里的
+                        // SetActive(false) 把【存活方（观战目标分身）正踩着的房间】关掉了——
+                        // 房间一关，地板 Collider2D 与门出口触发器一起失效，
+                        // 存活方当场掉出房间/门卡死，被 RoomFix 救回后重复。
+                        // 旧守卫只查本地尸体 localRoom，完全没查观战目标，故漏掉。
+                        // 新守卫：只要观战目标分身当前坐标仍在 previous 的 Bounds 内，
+                        // 就绝不关它。宁可多开一间房（相机另有问题），也不能让存活方掉坑。
+                        bool targetStillInPrevious = false;
+                        try
+                        {
+                            var pb = previous.Bounds;
+                            if (pb.size.x > 0.1f && pb.size.y > 0.1f && pb.Contains(targetPos))
+                                targetStillInPrevious = true;
+                        }
+                        catch { }
+
+                        if (!ReferenceEquals(previous, localRoom) && !targetStillInPrevious)
+                        {
+                            try
+                            {
+                                if (previous.gameObject.activeSelf) previous.gameObject.SetActive(false);
+                                // v3.0.18：房间关闭时 Prop 实例已归还对象池。清掉初始化标记，
+                                // 下次再进这间房才会重新走完整的种子/道具/存档初始化。
+                                _spectateInitRooms.Remove(previous);
+                                Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战换房，关闭上一房间: '" + previous.name + "'");
+                            }
+                            catch { /* 场景可能已卸载 */ }
+                        }
+                        else if (targetStillInPrevious)
+                        {
+                            // 保留 active，但仍从待恢复列表移除：存活方自己过门时会 SetActive(false)，
+                            // 我们不再在退出观战时重复关它。
+                            if (Time.unscaledTime - _skipCloseLogTime > 2f)
+                            {
+                                _skipCloseLogTime = Time.unscaledTime;
+                                Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战跳过关房 '" + previous.name
+                                    + "'：存活方仍在该房间内（关掉会让它掉出/卡门）。");
+                            }
+                        }
+                        _activatedRooms.Remove(previous);
+                    }
+
+                    // v3.0.18：清理更早以前残留的手动激活房。真机日志 activeRooms=3~4，
+                    // 'Merge Room 1' 在切到 '14*Standard*' 后仍常驻 active，多房并存让
+                    // 相机 confiner 和房间内容互相干扰（观战画面出现空白/错房间）。
+                    // 只关我们自己激活过、且目标与本地尸体都不在的房间。
+                    try
+                    {
+                        BaseRoom curLocalRoom = null;
+                        var psc2 = PS != null ? PS.LocalPlayer as PlayerController : null;
+                        try { if (psc2 != null) curLocalRoom = psc2.CurrentlyInRoom; } catch { }
+
+                        var stale = new List<BaseRoom>();
+                        foreach (var r in _activatedRooms)
+                        {
+                            if (r == null || ReferenceEquals(r, room) || ReferenceEquals(r, curLocalRoom)) continue;
+                            bool containsTarget = false;
+                            try
+                            {
+                                var rb = r.Bounds;
+                                containsTarget = rb.size.x > 0.1f && rb.size.y > 0.1f && rb.Contains(targetPos);
+                            }
+                            catch { }
+                            if (!containsTarget) stale.Add(r);
+                        }
+                        for (int i = 0; i < stale.Count; i++)
+                        {
+                            try
+                            {
+                                if (stale[i].gameObject.activeSelf) stale[i].gameObject.SetActive(false);
+                                Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战清理残留房间: '" + stale[i].name + "'");
+                            }
+                            catch { /* 场景可能已卸载 */ }
+                            _activatedRooms.Remove(stale[i]);
+                            _spectateInitRooms.Remove(stale[i]);
+                        }
+                    }
+                    catch { }
+
+                    // v2.8.7（借鉴 rl2-coop 观战）：房间"被原生提前激活"不等于内容已生成。
+                    // 旧版只在 !activeSelf 时才做 种子/激活/敌人/背景 初始化 —— 存活方
+                    // 跨 biome 换房时，新房间对象可能已被 SceneLoader 预激活，但
+                    // InitializeSpawnController/Background 还没跑（对端走的是完整换房流程），
+                    // 于是观战端拿到的就是一间空房/黑屏，而且永远不再初始化。
+                    // 改为：**首次进入观战视野的房间，无论 active 与否都完整初始化一次**，
+                    // 用 _spectateInitRooms 去重，避免每个房间反复刷怪。
+                    if (!_spectateInitRooms.Contains(room))
+                    {
+                        _spectateInitRooms.Add(room);
+                        EnsureRoomReflection();
+
+                        // v3.0.11：PlacePlayerInRoom_Start —— 原生进房第一步置 IsPlayerInRoom=true。
+                        // 旧版漏了这步，部分监听者读 IsPlayerInRoom 拿到 false → 房间内容不激活。
+                        if (_roomStartInit != null)
+                        {
+                            try { _roomStartInit.Invoke(room, null); }
+                            catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [DOWN] PlacePlayerInRoom_Start 失败: " + ex.Message); }
+                        }
+
+                        // 复刻 PlacePlayerInRoom_End 的顺序：种子 -> 激活 -> 敌人/道具 -> 背景
+                        try
+                        {
+                            // GetSpecialPropSeed 在 BaseRoom 是 abstract，实现在派生类上，用 room.GetType() 正确
+                            var seedMethod = AccessTools.Method(room.GetType(), "GetSpecialPropSeed");
+                            if (seedMethod != null)
+                                RNGManager.SetSeed(RngID.SpecialProps_RoomSeed, (int)seedMethod.Invoke(room, null));
+                        }
+                        catch { /* 种子只是道具随机，失败无碍 */ }
+
+                        bool wasActive = room.gameObject.activeSelf;
+                        if (!wasActive)
+                        {
+                            room.gameObject.SetActive(true);
+                            _activatedRooms.Add(room);   // 只有我们激活的，重置时才关回去
+                        }
+
+                        // v3.0.21：设施（天赋/武器切换点、治疗树）和怪必须分开补。
+                        // 旧版把两者绑在 CountMissingEnemies>0 一个条件上：怪齐全但
+                        // Prop 已随关房归还池时，InitializeSpawnControllerInstances 不跑，
+                        // 设施永远借不回来 —— 观战画面就只剩地板，看不到切换点/生命树。
+                        // 现在无条件先补 Prop/Chest（EnsureRoomProps 刻意不碰敌人），
+                        // 只有确实缺怪时才调完整的 InitializeSpawnControllerInstances。
+                        try
+                        {
+                            int props = EnsureRoomProps(room);
+                            if (props > 0)
+                                Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战房间补刷设施: '" + room.name
+                                    + "' " + props + " 个 Prop/Chest");
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战补刷设施失败: " + ex.Message);
+                        }
+                        try
+                        {
+                            if (RoomFix.CountMissingEnemies(room) > 0 && _roomSpawnInit != null)
+                            {
+                                _roomSpawnInit.Invoke(room, null);
+                                Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战房间补刷怪: '" + room.name + "'");
+                            }
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战补刷怪失败: " + ex.Message);
+                        }
+                        // 背景初始化单独 try：抛异常也不能连累后面的存档/相机
+                        if (_roomBgInit != null)
+                        {
+                            try { _roomBgInit.Invoke(room, null); }
+                            catch (Exception ex)
+                            {
+                                Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战背景初始化失败: " + ex.Message);
+                            }
+                        }
+                        Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战房间已激活: '" + room.name
+                            + "' (wasActive=" + wasActive + ")");
+                    }
+
+                    // 按客机地图的房间状态加载（主机打死的敌人不会复活，开过的箱子保持开过）。
+                    // v2.4.0：单独 try —— 这一步在客机端会抛 NRE（房间半初始化，
+                    // RoomSaveController.OnPlayerEnter_LoadStageData 里读 null）。
+                    // 旧版把它和下面的相机设置写在同一个 try 里，一抛异常相机就不切了，
+                    // 表现就是"观战时画面被锁在旧房间边界、露黑边/空白"。
+                    try
+                    {
+                        if (room.SaveController != null) room.SaveController.OnPlayerEnter_LoadStageData();
+                    }
+                    catch (Exception ex)
+                    {
+                        Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战房间存档加载失败（不影响观战）: " + ex.Message);
+                    }
+                }
+
+                // 相机边界切到该房间（否则 confiner 还锁在本地玩家房间）。
+                // 只在房间变化时设一次：本地玩家已 SetActive(false)，游戏不会再为它改 confiner，
+                // 定期重设反而会让画面每 2 秒抖一下。
+                if (roomChanged)
+                {
+                    // v3.0.15：确保选中的房间一定是 active。真机日志实锤：观战在合并房/成员房
+                    // 之间摇摆时，旧房被 SetActive(false)，再次选中它时因 _spectateInitRooms 去重
+                    // 跳过了激活分支 → 房间仍 inactive，其 vcam/门/内容全失效 = 摄像机停在上一间。
+                    // 无条件补一次激活（幂等：已 active 的节点 SetActive(true) 无副作用）。
+                    try
+                    {
+                        if (!room.gameObject.activeSelf)
+                        {
+                            room.gameObject.SetActive(true);
+                            if (!_activatedRooms.Contains(room)) _activatedRooms.Add(room);
+                            Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战重新激活房间: '" + room.name + "'");
+
+                            // v3.0.21：重激活只补 Prop/Chest，不调完整 InitializeSpawnControllerInstances
+                            //（那会把存活方正在打的怪重新借出并把 Target 指回本地尸体）。
+                            try
+                            {
+                                int props = EnsureRoomProps(room);
+                                if (props > 0)
+                                    Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战重激活后补刷房间道具: '"
+                                        + room.name + "' " + props + " 个 Prop/Chest");
+                            }
+                            catch (Exception ex)
+                            {
+                                Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战重激活补道具失败: " + ex.Message);
+                            }
+                        }
+                    }
+                    catch { /* 场景卸载中 */ }
+
+                    // v3.0.11：用真实门构造事件参数（部分监听者读 Door.Side，null 会 NRE 被吞 → 内容不加载）
+                    Door eventDoor = RoomFix.FindNearestDoor(room, targetPos);
+                    try { CameraController.UpdateRoomCameraSettings(new RoomViaDoorEventArgs(room, eventDoor)); }
+                    catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战相机设置失败: " + ex.Message); }
+
+                    // v3.0.11（黑屏根因修复）：原生 UpdateRoomCameraSettings 只设了 lens/zoom，
+                    // SetIsActiveCamera 是否生效取决于房间 vcam 是否 active。旧房被我们
+                    // SetActive(false) 后 Brain 可能仍激活着它的 vcam，而它的 confiner 已失效。
+                    // 这里显式把观战房的 vcam 提到 Brain 顶部并立即 InternalUpdate，掐掉黑屏窗口。
+                    PromoteSpectateCamera(room);
+
+                    // v3.0.11：补 BroadcastPlayerEnterRoomEvents（原生 PlacePlayerInRoom_End 最后一步）。
+                    // 缺这步 → PlayerEnterRoom relay 不派发，部分房间内容（道具/机关）不激活。
+                    // 广播前先确保 m_roomViaDoorEventArgs 已初始化（原生 _End 里做的），否则 broadcast 内部 NRE。
+                    if (_roomBroadcastEnter != null)
+                    {
+                        try
+                        {
+                            // v3.0.21：原生 PlacePlayerInRoom_End 对已存在的事件参数是
+                            // Initialise(this, door) —— 即把 Room 更新成【当前房间】。
+                            // 旧版只在 null 时 new，换房后 m_roomViaDoorEventArgs 仍指向
+                            // 上一间房，Broadcast 派发时 PlayerEnterRoom relay 带的是旧房间，
+                            // 新房里的 BaseSpecialRoomController 因此不触发
+                            // SpecialRoomInitializedRelay → 天赋/武器切换点、治疗树不显示。
+                            var args = _roomEventArgsField != null
+                                ? _roomEventArgsField.GetValue(room) as RoomViaDoorEventArgs : null;
+                            if (args == null)
+                            {
+                                args = new RoomViaDoorEventArgs(room, eventDoor);
+                                if (_roomEventArgsField != null)
+                                    _roomEventArgsField.SetValue(room, args);
+                            }
+                            else
+                            {
+                                args.Initialise(room, eventDoor);
+                            }
+                            _roomBroadcastEnter.Invoke(room, new object[] { eventDoor });
+                            Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战派发 PlayerEnterRoom: '" + room.name + "'");
+                        }
+                        catch (Exception ex)
+                        {
+                            Plugin.Log.LogWarning("[RL2MP] [DOWN] 观战广播 PlayerEnterRoom 失败: " + ex.Message);
+                        }
+                    }
+
+                    // v3.0.14：换房瞬间强制打一条诊断（此时最容易出现 confiner 失效/错房 vcam），
+                    // 并把节流计时推后 3 秒，避免紧接着 FollowSilent 又重复打一条。
+                    _nextCamDiagAt = Time.unscaledTime + 3f;
+                    GameObject diagTarget = null;
+                    try
+                    {
+                        var psDiag = PS;
+                        if (psDiag != null && SpectateTargetId >= 0)
+                            psDiag.RemotePlayers.TryGetValue(SpectateTargetId, out diagTarget);
+                    }
+                    catch { }
+                    DumpSpectateDiagnostics(room, diagTarget != null ? diagTarget.transform : null);
+                }
             }
             catch (Exception ex)
             {
@@ -388,17 +1138,125 @@ namespace RL2Multiplayer
             }
         }
 
+        /// <summary>
+        /// v2.8.3：用主机权威房间网格坐标精确定位房间。
+        /// 旧版用"存活怪平均世界坐标"猜房间，怪分散在相邻房间时平均点落到第三间，
+        /// 观战房间在 7*Bonus*/16*Trap* 之间反复横跳，confiner 锁在旧房间边界 →
+        /// 半屏/失真/主机到客机没去过的房间时全黑。主机 ALIVE 包里就带精确房间坐标，直接用。
+        /// </summary>
+        /// <summary>
+        /// v3.0.13：过渡房判定。'1*Transition*' 这类房间是场景切换的中转壳，
+        /// Bounds/相机配置异常，作观战目标会让 confiner 锁到错边界 = 半黑屏/全黑，
+        /// 且 Coordinates=(0,0) 会被网格选房误命中。观战选房一律排除。
+        /// </summary>
+        private static bool IsTransitionRoom(BaseRoom room)
+        {
+            if (room == null) return false;
+            try
+            {
+                string n = room.name;
+                return !string.IsNullOrEmpty(n)
+                    && n.IndexOf("Transition", StringComparison.OrdinalIgnoreCase) >= 0;
+            }
+            catch { return false; }
+        }
+
+        /// <summary>
+        /// v3.0.19：目标是否落房间的【可玩区】内。优先读房间 vcam 的 confiner
+        /// bounding shape（真机日志里 32x36 / 64x18，正是相机实际能显示的区域）；
+        /// 读不到时退化为把 Room.Bounds 每边缩掉 10m（letterbox 宽度）。
+        /// 不能用原始 Room.Bounds：它包含 letterbox，相邻房会同时命中。
+        /// </summary>
+        private static bool PlayableContains(BaseRoom room, Vector3 pos)
+        {
+            if (room == null) return false;
+            Bounds b = default(Bounds);
+            bool have = false;
+            try
+            {
+                EnsureRoomReflection();
+                var mgr = _roomCinemachineProp != null
+                    ? _roomCinemachineProp.GetValue(room, null) as CinemachineVirtualCameraManager
+                    : null;
+                if (mgr != null && mgr.gameObject != null)
+                {
+                    var confiner = mgr.gameObject.GetComponent("CinemachineConfiner_RL");
+                    if (confiner != null)
+                    {
+                        var field = AccessTools.Field(confiner.GetType(), "m_BoundingShape2D");
+                        var shape = field != null ? field.GetValue(confiner) as Collider2D : null;
+                        if (shape != null)
+                        {
+                            b = shape.bounds;
+                            have = b.size.x > 0.1f && b.size.y > 0.1f;
+                        }
+                    }
+                }
+            }
+            catch { }
+            if (!have)
+            {
+                try
+                {
+                    var rb = room.Bounds;
+                    b = new Bounds(rb.center, new Vector3(
+                        Mathf.Max(0f, rb.size.x - 20f), Mathf.Max(0f, rb.size.y - 20f), 1f));
+                    have = b.size.x > 0.1f && b.size.y > 0.1f;
+                }
+                catch { }
+            }
+            return have
+                && Mathf.Abs(pos.x - b.center.x) <= b.size.x * 0.5f + 0.5f
+                && Mathf.Abs(pos.y - b.center.y) <= b.size.y * 0.5f + 0.5f;
+        }
+
+        private static BaseRoom FindRoomByGridCoords(Vector2 coords)
+        {
+            try
+            {
+                // v3.0.11：合并房 MergeRoom 不是 Room，旧版 FindObjectsOfTypeAll<Room>()
+                // 看不到它，观战主路径若锚点失效就只能锁到相邻标准房（半屏/黑房）。
+                var rooms = Resources.FindObjectsOfTypeAll<BaseRoom>();
+                BaseRoom best = null;
+                float bestD = float.MaxValue;
+                // v3.0.22：网格坐标是【每个 biome 内部】的坐标系 —— 不同区域的
+                // (96,-180) 可能指向完全不同的房间。跨区域时如果不限 biome，
+                // 就会命中初始区域里同坐标的旧房间（视角跟着"看起来对、其实错"的房）。
+                // 权威端带了 biome 时，只在同一个 biome 内匹配。
+                int filterBiome = RoomTravelSync.RemoteBiome;
+                for (int i = 0; i < rooms.Length; i++)
+                {
+                    var r = rooms[i];
+                    if (r == null || !r.gameObject.scene.IsValid()) continue; // 排除 prefab
+                    if (IsTransitionRoom(r)) continue; // v3.0.13：过渡房不参与观战选房
+                    if (filterBiome >= 0 && (int)r.BiomeType != filterBiome) continue;
+                    var rr = r as Room;
+                    Vector2 rc = rr != null ? rr.Coordinates : (Vector2)r.transform.position;
+                    float d = (rc - coords).sqrMagnitude;
+                    if (d < bestD) { bestD = d; best = r; }
+                }
+                // 网格坐标是整数，1 格外就算没匹配上（不让"最近的错房间"混进来）
+                return bestD <= 1f ? best : null;
+            }
+            catch { return null; }
+        }
+
         /// <summary>找出包含该坐标的房间（含未激活的；世界坐标，x/y 判定，容差 1m）。</summary>
         private static BaseRoom FindRoomContaining(Vector3 pos)
         {
+            // v3.0.9：合并房 Bounds 覆盖多个标准房，旧的"偏好 active 房"会命中大合并房，
+            // 观战相机 confiner 跟着锁到错误边界 → 黑屏/半屏。改为优先【最贴合】的房：
+            // 命中房里 Bounds 面积最小的（通常就是玩家实际所在的那一间标准房），
+            // 面积相同再看是否 active。与门/换房问题的合并房根因一致。
             BaseRoom best = null;
-            BaseRoom bestActive = null;
+            float bestArea = float.MaxValue;
             var rooms = Resources.FindObjectsOfTypeAll<BaseRoom>();
             for (int i = 0; i < rooms.Length; i++)
             {
                 var r = rooms[i];
                 if (r == null) continue;
                 if (!r.gameObject.scene.IsValid()) continue; // 排除 prefab 资源
+                if (IsTransitionRoom(r)) continue; // v3.0.13：过渡房不参与观战选房
                 try
                 {
                     var b = r.Bounds;
@@ -406,12 +1264,16 @@ namespace RL2Multiplayer
                     Vector3 s = b.size;
                     if (Mathf.Abs(pos.x - c.x) > s.x * 0.5f + 1f) continue;
                     if (Mathf.Abs(pos.y - c.y) > s.y * 0.5f + 1f) continue;
-                    if (best == null) best = r;
-                    if (r.gameObject.activeSelf) bestActive = r;
+                    float area = Mathf.Max(0f, s.x) * Mathf.Max(0f, s.y);
+                    // 面积明显更小优先；面积接近时 active 优先（避免未激活空房抢赢）
+                    bool better = area < bestArea - 1f
+                        || (Mathf.Abs(area - bestArea) <= 1f && r.gameObject.activeSelf
+                            && (best == null || !best.gameObject.activeSelf));
+                    if (best == null || better) { best = r; bestArea = area; }
                 }
                 catch { /* Bounds 可能在未初始化房间上抛异常 */ }
             }
-            return bestActive != null ? bestActive : best;
+            return best;
         }
 
         // ---------------- 状态切换 ----------------
@@ -456,10 +1318,19 @@ namespace RL2Multiplayer
             ClearEnemyAggro();
             _aggroClearTimer = 0f;
             _roomCheckTimer = 0f;
-            _spectatedRoom = null;
+            ClearSpectateRoomSelection();
 
             var target = EnsureTarget();
             if (target != null) Follow(target.transform);
+
+            // v2.4.1：立刻把"我倒了"发出去，不等 0.3s 心跳。
+            // 全灭判定就靠这个状态，晚 1 秒都可能让另一端多打一轮。
+            try
+            {
+                var nm = NetworkManager.Instance;
+                if (nm != null) nm.SendDownedNow(true);
+            }
+            catch (Exception ex) { Plugin.Log.LogWarning("[RL2MP] [DOWN] 广播倒地状态失败: " + ex.Message); }
 
             Plugin.Log.LogInfo("[RL2MP] [DOWN] local player DOWNED (" + reason + ") at ("
                 + LastAlivePos.x.ToString("F1") + "," + LastAlivePos.y.ToString("F1") + "). "
@@ -683,6 +1554,7 @@ namespace RL2Multiplayer
                 catch { /* 场景可能已在卸载，忽略 */ }
             }
             _activatedRooms.Clear();
+            _spectateInitRooms.Clear();   // v2.8.7：新一段观战允许重新初始化房间
         }
 
         internal static void Revive(string reason)
@@ -691,8 +1563,24 @@ namespace RL2Multiplayer
             LocalDown = false;
             // 复活后必须关掉真死放行，否则下一次死亡会直接走游戏原生死亡（回城堡）
             AllowRealDeath = false;
+            _realDeathAttempts = 0;
+            _realDeathRetryAt = 0f;
             SpectateTargetId = -1;
-            _spectatedRoom = null;
+            ClearSpectateRoomSelection();
+
+            // v2.4.1：站起来也要告诉对端，否则对面一直把我当尸体，永远不判全灭
+            try
+            {
+                var nm = NetworkManager.Instance;
+                if (nm != null) nm.SendDownedNow(false);
+            }
+            catch { }
+
+            // v2.8.8：主机倒地期间 BossProgressSync.HostTick 停播了权威位图；
+            // 复活这一刻必须强制重发当前 mask，否则客机可能还停在"主机倒地前的旧位图"上，
+            // 与主机当前 Boss 门状态不一致 → 进出门口出错。
+            // _lastSentMask 重置为 MaxValue 会让下一拍 HostTick 无条件广播一次。
+            try { BossProgressSync.ResetHost(); } catch { }
 
             var ps = PS;
             var go = ps != null ? ps.CachedLocalPlayerObject : null;
@@ -807,22 +1695,63 @@ namespace RL2Multiplayer
         /// <summary>全员倒下 -> 放行真实死亡，让游戏正常走回城流程。</summary>
         internal static void TriggerRealDeath()
         {
-            if (AllowRealDeath) return;
-            AllowRealDeath = true;
+            if (!AllowRealDeath)
+            {
+                AllowRealDeath = true;
+                _realDeathAttempts = 0;
+                _realDeathRetryAt = 0f;
+
+                Plugin.Log.LogInfo("[RL2MP] [DOWN] ALL PLAYERS DOWN -> letting the real death through.");
+
+                ClearSpectateRoomSelection();
+                RestoreSpectateRooms(null);
+
+                // 角色必须重新 active：GoDown 里把整个人 SetActive(false) 了，
+                // 原生 KillCharacter 会遍历 Animator 参数 / 停能力 / 派发事件，
+                // 对象处于 inactive 时其中一步抛异常就会让"死亡窗口"永远打不开。
+                try
+                {
+                    var ps0 = PS;
+                    var go0 = ps0 != null ? ps0.CachedLocalPlayerObject : null;
+                    if (go0 != null && !go0.activeSelf) go0.SetActive(true);
+                }
+                catch (Exception ex)
+                {
+                    Plugin.Log.LogWarning("[RL2MP] [DOWN] 重新激活角色失败: " + ex.Message);
+                }
+            }
+
+            TryFireRealDeath();
+        }
+
+        /// <summary>
+        /// v2.4.1：真正去触发原生死亡，并且**可重试**。
+        ///
+        /// 上一版的问题：catch 之后直接 `LocalDown = false`，把唯一的接管通道关掉，
+        /// 而死亡窗口根本没打开 —— 表现就是"客机卡死在游戏里，既不能动也不能回城"。
+        /// 现在失败会保留观战状态并定时重试，三级兜底：
+        ///   1) 原生 KillCharacter；
+        ///   2) 手动打开 PlayerDeath 窗口；
+        ///   3) 直接切 Lineage。
+        /// </summary>
+        private static void TryFireRealDeath()
+        {
+            _realDeathAttempts++;
+            _realDeathRetryAt = 0f;
 
             var ps = PS;
             if (ps == null || ps.LocalPlayer == null)
             {
                 Plugin.Log.LogWarning("[RL2MP] [DOWN] all down but no local player ref; cannot trigger real death.");
+                _realDeathRetryAt = Time.unscaledTime + 0.5f;
                 return;
             }
 
-            Plugin.Log.LogInfo("[RL2MP] [DOWN] ALL PLAYERS DOWN -> letting the real death through.");
-
-            _spectatedRoom = null;
-            RestoreSpectateRooms(null);
-            var go = ps.CachedLocalPlayerObject;
-            if (go != null && !go.activeSelf) go.SetActive(true);
+            if (IsDeathWindowOpen())
+            {
+                FinishRealDeath("already open");
+                return;
+            }
 
             try
             {
@@ -840,10 +1769,130 @@ namespace RL2Multiplayer
             }
             catch (Exception ex)
             {
-                Plugin.Log.LogWarning("[RL2MP] [DOWN] trigger real death failed: " + ex.Message);
+                // 反射调用抛的是 TargetInvocationException，真正的原因藏在 InnerException。
+                // 上一版只打了 ex.Message（"Exception has been thrown by the target of an invocation."），
+                // 等于什么都没说，这才导致这次卡死查不出根因。
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] trigger real death failed (attempt "
+                    + _realDeathAttempts + "): " + DescribeException(ex));
             }
 
+            if (IsDeathWindowOpen())
+            {
+                FinishRealDeath("KillCharacter");
+                return;
+            }
+
+            // 兜底 1：原生流程可能已经把 IsDead 设成 true，但窗口那一步没走到
+            ForceOpenDeathWindow();
+            if (IsDeathWindowOpen())
+            {
+                FinishRealDeath("forced window");
+                return;
+            }
+
+            // 兜底 2：死亡窗口彻底打不开 -> 直接回 Lineage，至少不把人锁在空白世界里
+            if (_realDeathAttempts >= 3)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 三次尝试仍未进入死亡流程 -> 强制切换到 Lineage。");
+                HardReturnToLineage();
+                FinishRealDeath("hard lineage");
+                return;
+            }
+
+            _realDeathRetryAt = Time.unscaledTime + 0.6f;
+            Plugin.Log.LogWarning("[RL2MP] [DOWN] 死亡流程未启动，0.6s 后重试（第 "
+                + _realDeathAttempts + " 次）。观战保持，不会卡死。");
+        }
+
+        private static void FinishRealDeath(string how)
+        {
+            _realDeathRetryAt = 0f;
             LocalDown = false;
+            CoOpRescue.LocalDown = false;
+            SpectateTargetId = -1;
+            Plugin.Log.LogInfo("[RL2MP] [DOWN] 已进入原生死亡流程（" + how + "），角色交还给游戏。");
+        }
+
+        /// <summary>v2.4.1：收到对端"本局结束"通知。只在本端也已倒下时跟随，避免误杀活人。</summary>
+        internal static void OnRunOverReceived(int fromId)
+        {
+            if (Score.Style != PlayStyle.CoOp) return;
+
+            bool meDown = LocalDown || IsDeathWindowOpen();
+            if (!meDown)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [RUNOVER] 对端(id=" + fromId
+                    + ")报告全员倒下，但本端仍在存活状态 -> 忽略（不杀活人）。");
+                return;
+            }
+
+            Plugin.Log.LogInfo("[RL2MP] [RUNOVER] 跟随对端结束本局（id=" + fromId + "）。");
+            // v2.8.8：闭锁本端全灭判定，避免对端先真死的 downed=0 反弹把计时清掉后自己卡住。
+            CoOpRescue.OnRunOver();
+            CoOpRescue.LocalDown = false;
+            TriggerRealDeath();
+        }
+
+        private static bool IsDeathWindowOpen()
+        {
+            try
+            {
+                var t = AccessTools.TypeByName("RL_Windows.WindowManager");
+                if (t == null) return false;
+                var m = t.GetMethod("GetIsWindowOpen", new Type[] { typeof(WindowID) });
+                if (m == null) return false;
+                object r = m.Invoke(null, new object[] { WindowID.PlayerDeath });
+                return r is bool && (bool)r;
+            }
+            catch { return false; }
+        }
+
+        private static void ForceOpenDeathWindow()
+        {
+            try
+            {
+                var t = AccessTools.TypeByName("RL_Windows.WindowManager");
+                if (t == null) return;
+                var m = t.GetMethod("SetWindowIsOpen", new Type[] { typeof(WindowID), typeof(bool) });
+                if (m == null) return;
+                m.Invoke(null, new object[] { WindowID.PlayerDeath, true });
+                Plugin.Log.LogInfo("[RL2MP] [DOWN] 已手动打开 PlayerDeath 窗口（兜底）。");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 手动打开死亡窗口失败: " + DescribeException(ex));
+            }
+        }
+
+        private static void HardReturnToLineage()
+        {
+            try
+            {
+                try { SaveManager.PlayerSaveData.IsDead = true; } catch { }
+                SceneLoader_RL.LoadScene(SceneID.Lineage, TransitionID.FadeToBlackWithLoading);
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 已强制切场景 -> Lineage。");
+            }
+            catch (Exception ex)
+            {
+                Plugin.Log.LogWarning("[RL2MP] [DOWN] 强制切 Lineage 失败: " + DescribeException(ex));
+            }
+        }
+
+        /// <summary>把异常链（含 TargetInvocationException 的内层）拼成可读文本。</summary>
+        private static string DescribeException(Exception ex)
+        {
+            var sb = new System.Text.StringBuilder();
+            int depth = 0;
+            while (ex != null && depth < 4)
+            {
+                if (depth > 0) sb.Append(" <- ");
+                sb.Append(ex.GetType().Name).Append(": ").Append(ex.Message);
+                if (!string.IsNullOrEmpty(ex.StackTrace))
+                    sb.Append("\n    ").Append(ex.StackTrace.Replace("\n", "\n    "));
+                ex = ex.InnerException;
+                depth++;
+            }
+            return sb.ToString();
         }
 
         internal static void ResetAll(string reason)
@@ -854,10 +1903,12 @@ namespace RL2Multiplayer
             }
             LocalDown = false;
             AllowRealDeath = false;
+            _realDeathAttempts = 0;
+            _realDeathRetryAt = 0f;
             SpectateTargetId = -1;
             _vcam = null;
             _lastFollow = null;
-            _spectatedRoom = null;
+            ClearSpectateRoomSelection();
             _aggroSuppressionUntil = 0f;
             _freezeTimer = 0f;
             // 换场景 = 换楼层，旧的死亡点/落脚点在新区里没有意义
@@ -872,6 +1923,12 @@ namespace RL2Multiplayer
             CoOpRescue.ResetAll(reason);
             // v1.7.9：共享血量的防循环标志一并清理。
             EnemySync.ResetAll();
+            // v1.8.4：冲刺特效豁免集合一并清理。
+            DashFxSync.ResetAll();
+            // v2.0.0：怪物权威位置字典一并清理（换场景=全新一层，旧 key 不再适用）。
+            EnemyPositionSync.ResetAll();
+            EnemyAliveSync.ResetAll();  // v2.5.0：存活权威集（换场景全新）
+            ObstacleSync.ResetAll();    // v2.5.0：障碍物位置字典
         }
 
         /// <summary>调试用：把所有远程玩家标记为倒地，用来验证"全员倒下 -> 真实死亡"。</summary>
@@ -921,7 +1978,8 @@ namespace RL2Multiplayer
             // v1.6.2：复活保护窗。QuickRespawn 只在起立瞬间清一次仇恨，
             // 怪物 1.5s 无敌一过就重新索敌 -> 刚站起又被围殴秒杀，看起来像
             // "复活了但马上又死"。保护窗内每 0.5s 再清一次。
-            if (Time.unscaledTime < _aggroSuppressionUntil)
+            // v2.4.0：观战期间不走这段（此时仇恨已经转给活着的队友，清掉反而让怪发呆）。
+            if (!LocalDown && Time.unscaledTime < _aggroSuppressionUntil)
             {
                 _aggroClearTimer += Time.unscaledDeltaTime;
                 if (_aggroClearTimer >= 0.5f)
@@ -934,11 +1992,9 @@ namespace RL2Multiplayer
 
             if (!LocalDown) return;
 
-            // v1.7.8：协作倒地待救由 CoOpRescue 全权管理（自救窗口/救援/惩罚），
-            // 绝不走竞速观战的"8 秒无人自动复活 / 全员倒下真死"——否则救援规则被破坏。
-            if (Score.Style == PlayStyle.CoOp && CoOpRescue.LocalDown)
-                return;
-
+            // v2.4.0：协作模式也走同一套观战维护（镜头跟随队友 / 切换目标 / 激活观战房间）。
+            // 旧版这里对协作 early-return，因为当时的协作是"倒地待救"，镜头要钉在自己尸体上；
+            // 扶起机制删除后，协作死亡 = 观战，必须让下面这段跑起来才能看到队友和怪物。
             var target = EnsureTarget();
             if (target != null)
             {
@@ -949,27 +2005,67 @@ namespace RL2Multiplayer
 
                 // 主机换房间 -> 客机端激活对应房间 + 相机边界跟过去（每 0.5s 查一次，别每帧扫）
                 _roomCheckTimer += Time.unscaledDeltaTime;
-                if (_roomCheckTimer >= 0.5f)
+                // v3.0.4：权威易手后立刻强制重解析一次，不等 0.5s 节流。
+                bool forceRoom = ForceSpectateRoomRefresh;
+                if (forceRoom) ForceSpectateRoomRefresh = false;
+                if (_roomCheckTimer >= 0.5f || forceRoom)
                 {
                     _roomCheckTimer = 0f;
-                    EnsureSpectateRoom(target.transform.position);
+                    // v2.8.6：换房包的权威坐标优先。EnemyAliveSync.HostRoomCoords 只在
+                    // 客机端计算（主机广播、客机接收），所以主机倒地观战客机时它永远是
+                    // 无效的 —— 只能拿分身坐标猜房间，再被 bestActive 偏好锁在旧房间，
+                    // 表现就是"客机去了主机没探索的房间，主机观战全黑"。
+                    Vector2? hostGrid = RoomTravelSync.HasRemoteRoom
+                        ? (Vector2?)RoomTravelSync.RemoteRoomCoords
+                        : (EnemyAliveSync.HasHostRoomCoords ? (Vector2?)EnemyAliveSync.HostRoomCoords : null);
+                    Vector2? hostAnchor = RoomTravelSync.HasRemoteAnchor
+                        ? (Vector2?)RoomTravelSync.RemoteRoomAnchor
+                        : null;
+                    Vector3 roomProbe = RoomTravelSync.HasRemoteRoom
+                        ? RoomTravelSync.RemoteRoomLanding
+                        : (EnemyAliveSync.HasHostAliveCenter
+                            ? EnemyAliveSync.HostAliveCenter
+                            : target.transform.position);
+
+                    // v3.0.13：真机铁证 [AUTHROOM] 权威坐标=(0,0) → FindRoomByGridCoords((0,0))
+                    // 命中 '1*Transition*' 过渡房（Bounds 异常）→ confiner 锁错边界 = 半黑屏，
+                    // 且全程卡在过渡房。权威网格/锚点为 (0,0) 时一律视为无效。
+                    // 观战目标分身的世界坐标是准的（日志 [INTERP] current=(61,7) 等），
+                    // 用它做落点 probe，FindRoomContaining 就能命中分身真实所在房。
+                    // 注意：分身是 StripClone 后的纯视觉克隆，没有 PlayerController，
+                    // 因此不能读 CurrentlyInRoom，只能用世界坐标反查。
+                    if (hostGrid.HasValue && Mathf.Abs(hostGrid.Value.x) + Mathf.Abs(hostGrid.Value.y) < 0.05f)
+                        hostGrid = null;
+                    if (hostAnchor.HasValue && Mathf.Abs(hostAnchor.Value.x) + Mathf.Abs(hostAnchor.Value.y) < 0.05f)
+                        hostAnchor = null;
+                    Vector3 spectateProbe = target.transform.position;
+                    EnsureSpectateRoom(spectateProbe, hostGrid, hostAnchor);
                 }
 
-                _refollowTimer += Time.unscaledDeltaTime;
-                if (_refollowTimer >= 1f)
-                {
-                    _refollowTimer = 0f;
-                    FollowSilent(target.transform);
-                }
+                // v2.8.3：每当房间切换，游戏会激活新房间的专属 vcam 并把 Follow 改回本地玩家
+                //（已隐藏的尸体）。旧版 1 秒才纠一次，中间画面跟着尸体/confiner 锁旧边界 →
+                // 半屏、失真、黑屏。改为每帧重设到观战目标（只写一个引用，无日志、开销极小）。
+                FollowSilent(target.transform);
             }
             else
             {
-                // 一个能看的人都没有（队友全掉线/全退了）：别让人永远躺在地上
+                // 一个能观战的人都没有（队友全退了）：别让人永远躺在观战里。
                 _stuckTimer += Time.unscaledDeltaTime;
                 if (_stuckTimer >= 8f)
                 {
                     _stuckTimer = 0f;
-                    Revive("no one left to spectate");
+                    if (Score.Style == PlayStyle.CoOp)
+                    {
+                        // 协作：队友全退了，本局作废 —— 自己走原生死亡回城，而不是原地复活
+                        // （复活会变成"一个人继续打"，进度和结算都说不清）。
+                        Plugin.Log.LogInfo("[RL2MP] [DOWN] 观战目标全部离开（协作模式）-> 结束本局。");
+                        CoOpRescue.LocalDown = false;
+                        TriggerRealDeath();
+                    }
+                    else
+                    {
+                        Revive("no one left to spectate");
+                    }
                     return;
                 }
             }
@@ -984,13 +2080,10 @@ namespace RL2Multiplayer
                     + " room=" + (_spectatedRoom != null ? _spectatedRoom.name : "<none>"));
             }
 
-            // 新激活的房间会刷出新怪并重新锁定玩家，定期再清一遍
-            _aggroClearTimer += Time.unscaledDeltaTime;
-            if (_aggroClearTimer >= 2f)
-            {
-                _aggroClearTimer = 0f;
-                ClearEnemyAggro();
-            }
+            // v2.4.0：**不再**定期清仇恨。
+            // 旧版每 2 秒把怪的 Target 清成 null（防"怪对着尸体打"）。但扶起机制删除后
+            // 仇恨会由 EnemyAiFix 转给活着的队友，定时清空只会让怪反复"发呆 → 重新锁定"，
+            // 在画面上又是一轮抽搐。清理动作现在只在 GoDown / 复活窗里做一次。
 
             if (!InSession)
             {
@@ -1005,9 +2098,14 @@ namespace RL2Multiplayer
                 return;
             }
 
-            if (RemoteCount > 0 && AliveRemoteCount == 0)
+            // v2.4.1：全灭判定统一交给 CoOpRescue（1.5s 确认 + 广播 RunOver）。
+            // 旧版这里还有一条"RemoteCount>0 && AliveRemoteCount==0 立刻真死"，
+            // 会和 CoOpRescue 的确认窗打架：一端刚收到 downed 状态就立刻杀进程，
+            // 另一端还没收到结束通知，两端状态就分叉了。
+            // 这里只负责把上一步失败的"真实死亡"重试推进。
+            if (AllowRealDeath && _realDeathRetryAt > 0f && Time.unscaledTime >= _realDeathRetryAt)
             {
-                TriggerRealDeath();
+                TryFireRealDeath();
             }
         }
     }
@@ -1017,6 +2115,8 @@ namespace RL2Multiplayer
     {
         private void Awake()
         {
+            // v3.0.22：登记为稳定宿主，供 BiomeRoomBuilder 跑原生协程。
+            DownedState.HostBehaviour = this;
             SceneManager.sceneLoaded += OnSceneLoaded;
         }
 
@@ -1038,8 +2138,9 @@ namespace RL2Multiplayer
             RoomFix.Tick();
             CoOpRescue.Tick();
 
-            // 协作待救状态由 CoOpRescue 管理，不走竞速观战的 [ ] 切换
-            if (CoOpRescue.LocalDown) return;
+            // v2.4.0：协作模式死亡也是观战了，[ ] 切换必须照常可用。
+            // 旧版这里对 CoOpRescue.LocalDown 直接 return（那时候协作是"倒地待救"，
+            // 镜头钉在自己尸体上，没有切换的必要），删掉扶起后就变成了"观战但换不了目标"。
             if (!DownedState.LocalDown) return;
 
             if (Input.GetKeyDown(KeyCode.LeftBracket))

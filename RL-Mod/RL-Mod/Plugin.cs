@@ -10,16 +10,39 @@ using UnityEngine.SceneManagement;
 
 namespace RL2Multiplayer
 {
-    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "1.8.2")]
+    [BepInPlugin("com.rl2.mp", "Rogue Legacy 2 Multiplayer", "3.0.26")]
     public class Plugin : BaseUnityPlugin
     {
         internal static ManualLogSource Log;
         internal static Plugin Instance;
 
         public static ConfigEntry<string> HostAddressCfg;
+        public static ConfigEntry<string> PlayerNameCfg;
         public static ConfigEntry<bool> DebugModeCfg;
+        public static ConfigEntry<bool> KeepWorldRunningCfg;
+        public static ConfigEntry<bool> CoOpRoomSyncCfg;
+        public static ConfigEntry<bool> CoOpSceneSyncCfg;
 
         public static string HostAddress { get { return HostAddressCfg != null ? HostAddressCfg.Value : "127.0.0.1"; } }
+
+        /// <summary>
+        /// 本机在联机中显示的名字（聊天标签/大厅名单）。限制长度并剥掉控制字符，
+        /// 避免把聊天面板或 GUI 撑坏；空值回退为"玩家"。
+        /// </summary>
+        public static string PlayerName
+        {
+            get
+            {
+                string s = PlayerNameCfg != null ? PlayerNameCfg.Value : "";
+                if (s == null) s = "";
+                s = NetValidation.Text(s.Trim());
+                if (s.Length > 16) s = s.Substring(0, 16);
+                return string.IsNullOrEmpty(s) ? "玩家" : s;
+            }
+        }
+
+        /// <summary>统一版本号文本，供 UI 显示。</summary>
+        public static string VersionText { get { return "3.0.26"; } }
 
         public static bool DebugMode { get; private set; }
 
@@ -67,14 +90,24 @@ namespace RL2Multiplayer
             Log = Logger;
             Instance = this;
 
-            Log.LogInfo("[RL2MP] === Plugin Awake START (v1.8.2) ===");
+            Log.LogInfo("[RL2MP] === Plugin Awake START (v3.0.26) ===");
 
             Log.LogInfo("[RL2MP] Binding BepInEx config entries...");
             HostAddressCfg = Config.Bind<string>("Network", "HostAddress", "127.0.0.1", "主机 IP 地址（客户端连接时使用）");
+            PlayerNameCfg = Config.Bind<string>("Network", "PlayerName", "玩家",
+                "联机时显示的名字（聊天和名单里用来自我介绍；两端各自设置）");
             DebugModeCfg = Config.Bind<bool>("Debug", "DebugMode", false, "单人调试模式：模拟一个远程玩家，无需真实网络");
+            KeepWorldRunningCfg = Config.Bind<bool>("CoOp", "KeepWorldRunningWhenPaused", true,
+                "联机时打开暂停菜单是否保持游戏世界继续运行（推荐开启：避免暂停导致怪物血量/AI 不同步）");
+            CoOpRoomSyncCfg = Config.Bind<bool>("CoOp", "EnableRoomSync", true,
+                "协作全员换房：任一人过门，所有人一起进新房（协作模式自动开启；竞速/单人无效）");
+            CoOpSceneSyncCfg = Config.Bind<bool>("CoOp", "EnableSceneSync", true,
+                "协作全员场景切换：主机回家/上船/开新局时客机跟随（协作模式自动开启；竞速/单人无效）");
 
             DebugMode = DebugModeCfg.Value;
-            Log.LogInfo("[RL2MP] Config ready. HostAddress='" + HostAddress + "', DebugMode=" + DebugMode);
+            PauseCompat.KeepWorldRunning = KeepWorldRunningCfg.Value;
+            Log.LogInfo("[RL2MP] Config ready. HostAddress='" + HostAddress + "', DebugMode=" + DebugMode
+                + ", KeepWorldRunning=" + PauseCompat.KeepWorldRunning);
 
             Log.LogInfo("[RL2MP] Creating Harmony instance 'com.rl2.mp'...");
             _harmony = new Harmony("com.rl2.mp");
@@ -82,14 +115,39 @@ namespace RL2Multiplayer
             DownedPatches.Apply(_harmony);
             CoOpRescue.Apply(_harmony);
             EnemySync.Apply(_harmony);
+            RoomTravelSync.Apply(_harmony);  // v2.0.0：协作全员换房（默认关闭）
+            SceneChangeSync.Apply(_harmony); // v2.0.0：协作全员场景切换（默认关闭）
+            SkillTreeSync.Apply(_harmony);    // v2.0.2：协作技能树共享（取 max 并集，写各自存档）
+            PlayerHurtSync.Apply(_harmony);   // v2.1.0：分身受击转发（本地受伤时间戳用于去重）
+            PauseDamageFix.Apply(_harmony);   // v2.2.1：暂停菜单期间不再把玩家判成无敌
+            EnemyAiFix.Apply(_harmony);       // v3.0.11：攻击距离按所有活玩家判定（修"怪不攻击客机"根因）
             SeedSync.Apply(_harmony);
             RacePatches.Apply(_harmony);
             ScorePatches.Apply(_harmony);
             ProjectileSync.Apply(_harmony);
+            DashFxSync.Apply(_harmony);
+            PauseCompat.Apply(_harmony);   // v1.9.0：联机暂停不冻结世界
+            // v3.0.24 引入：失焦不再挂起主循环（runInBackground）+ 联机失焦不弹暂停菜单。
+            // 必须在 PauseCompat 之前跑：runInBackground 要尽早生效，否则失焦的那一方
+            // 会连 Update/onBeforeRender 一起停掉，收发和门触发器自愈全部停摆。
+            BackgroundRun.Apply(_harmony);
+            MainMenuHubButton.Apply(_harmony);  // v1.9.0：主菜单原生「联机中心」按钮
+            PauseMenuHubTab.Apply(_harmony);    // v1.9.3：ESC 暂停菜单「联机中心」Tab
             RoomFix.Apply(_harmony);
+            try { ObstacleSync.ApplyCullingPatch(_harmony); }
+            catch (Exception ex) { Log.LogWarning("[RL2MP] 机关离屏保活注册失败（已隔离）: " + ex.Message); }
             MapSync.ApplyPatches(_harmony);
             RaceRulesSync.ApplySaveProtection(_harmony);
             Bootstrap.ApplyLateInitPatch(_harmony);
+            // v3.0.3：施法动画事件重放放最后——它是新增的、有风险的 patch，
+            // 即便它内部出了问题，也不该挡住前面这些已验证的功能（尤其主菜单按钮注册）。
+            AbilityFxSync.Apply(_harmony);
+            // v3.0.23 引入：一次性世界状态共享（易碎品/治疗树），最后注册、失败不挡前面。
+            WorldStateSync.Apply(_harmony);
+            // v3.0.25：开局流程同步（交钱给 Charon + 锁城堡/世界锁 + 那套动画）。
+            RunStartSync.Apply(_harmony);
+            // v3.0.26：漂流屋挑战的会合门闩（两端都选好才一起进）。
+            ChallengeSync.Apply(_harmony);
             Log.LogInfo("[RL2MP] Harmony patch applied.");
 
             // RL2 的启动流程（OnGameLoadManager.Run -> Application..cctor -> Chainloader）末尾会把

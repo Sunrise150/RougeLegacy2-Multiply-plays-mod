@@ -1737,45 +1737,32 @@ namespace RL2Multiplayer
             }
         }
 
-        /// <summary>协作 HUD 状态行：倒地待救 / 自救倒计时 / 救人进度 / 血上限惩罚。</summary>
+        /// <summary>协作 HUD 状态行：观战中 / 观战目标。</summary>
         private static void DrawCoOpStatus(float w)
         {
             Color prev = GUI.color;
             float y = 84f;
             float lineH = 22f;
 
-            // 血上限惩罚（任何协作对局中若已累积就常驻显示）
-            float penalty = CoOpRescue.PenaltyRatio;
-            if (penalty > 0f)
-            {
-                GUI.color = new Color(1f, 0.55f, 0.5f, 0.9f);
-                GUI.Label(new Rect(8f, y, w - 16f, lineH),
-                    "血上限 -" + (penalty * 100f).ToString("F0") + "%（被队友救起可恢复）", _small);
-                y += lineH;
-            }
-
             if (CoOpRescue.LocalDown)
             {
-                GUI.color = new Color(1f, 0.5f, 0.45f, 0.95f);
-                GUI.Label(new Rect(8f, y, w - 16f, lineH), "你已倒地 · 等待队友靠近长按 H 救援", _line);
+                GUI.color = new Color(1f, 0.72f, 0.42f, 0.95f);
+                GUI.Label(new Rect(8f, y, w - 16f, lineH), "你已倒下 · 观战中（[ ] 切换目标）", _line);
                 y += lineH;
-                string sub = CoOpRescue.SafeCondition
-                    ? "房间安全 · 无人救则 " + Mathf.CeilToInt(Mathf.Max(0f, CoOpRescue.SelfRescueRemaining)) + " 秒后自行爬起"
-                    : "房间有怪/队友不在 · 自救暂停（队友仍可强行救援）";
-                GUI.Label(new Rect(8f, y, w - 16f, lineH), sub, _small);
-            }
-            else if (CoOpRescue.RescueTargetId >= 0)
-            {
-                GUI.color = new Color(0.5f, 1f, 0.65f, 0.95f);
-                int pct = Mathf.Clamp(Mathf.RoundToInt(CoOpRescue.RescueProgress * 100f), 0, 100);
+
+                GUI.color = new Color(0.78f, 0.9f, 1f, 0.85f);
+                string who = DownedState.SpectateTargetId >= 0
+                    ? "P" + DownedState.SpectateTargetId
+                    : "无（队友全部倒下）";
                 GUI.Label(new Rect(8f, y, w - 16f, lineH),
-                    "长按 H 救援队友… " + pct + "%", _line);
+                    "正在观看 " + who + " · 队友存活 "
+                    + DownedState.AliveRemoteCount + "/" + DownedState.RemoteCount, _small);
             }
             else
             {
-                GUI.color = new Color(0.75f, 0.9f, 1f, 0.85f);
+                GUI.color = new Color(0.75f, 0.9f, 1f, 0.8f);
                 GUI.Label(new Rect(8f, y, w - 16f, lineH),
-                    "靠近倒地队友 · 长按 H 救起", _small);
+                    "倒下后自动进入观战 · [ ] 切换观战目标", _small);
             }
 
             GUI.color = prev;
